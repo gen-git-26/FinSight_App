@@ -32,8 +32,7 @@ def build_agent():
             "Keep answers concise and data-backed. Use tools to fetch data, then the built-in Fusion RAG "
             "will verify and enrich. Prefer bullet points; include tickers and dates when citing."
         ),
-        max_iterations=4,
-        max_tokens=1200,
+
         add_history_to_messages=False,
         show_tool_calls=False,
         tools=[
