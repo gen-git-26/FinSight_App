@@ -1,4 +1,5 @@
-
+# rag/fusion.py
+# This module implements the fusion of search results using Reciprocal Rank Fusion (RRF) and
 from __future__ import annotations
 
 import asyncio

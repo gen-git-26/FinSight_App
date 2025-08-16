@@ -1,3 +1,6 @@
+# tools/tools.py
+# This file contains various tools for financial data retrieval and analysis.
+
 import asyncio
 import json
 import websockets

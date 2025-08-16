@@ -1,4 +1,5 @@
-
+# utils/logging.py
+# This module sets up logging for the application with colored output.
 import logging
 from colorlog import ColoredFormatter
 
