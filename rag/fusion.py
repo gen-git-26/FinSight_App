@@ -1,23 +1,28 @@
 # rag/fusion.py
-# This module implements the fusion of search results using Reciprocal Rank Fusion (RRF) and
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Callable, Optional
+from functools import wraps
+import re
+import json
 
+import numpy as np
+import httpx
 from qdrant_client.http import models as rest
 
 from rag.embeddings import embed_texts, sparse_from_text
 from rag.qdrant_client import HybridQdrant
 from utils.config import load_settings
-import httpx
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_K = 12
+MAX_SNIPPET_CHARS = 600
+LLM_MAX_TOKENS = 512
 
-def reciprocal_rank_fusion(results: List[List[rest.ScoredPoint]], k: int = 60) -> List[rest.ScoredPoint]:
+def _rrf(results: List[List[rest.ScoredPoint]], k: int = 60) -> List[rest.ScoredPoint]:
     scores: Dict[str, float] = {}
     lookup: Dict[str, rest.ScoredPoint] = {}
     for result in results:
@@ -28,67 +33,153 @@ def reciprocal_rank_fusion(results: List[List[rest.ScoredPoint]], k: int = 60) -
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     return [lookup[rid] for rid, _ in ranked]
 
-
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     denom = (np.linalg.norm(a) * np.linalg.norm(b)) or 1e-8
     return float(np.dot(a, b) / denom)
 
 
-async def retrieve(query: str, *, filters: List[rest.FieldCondition]) -> List[rest.ScoredPoint]:
+async def retrieve(query: str, *, filters: Optional[List[rest.FieldCondition]] = None, k: int = DEFAULT_K) -> List[rest.ScoredPoint]:
     qdr = HybridQdrant()
     qdr.ensure_collections()
     sparse = sparse_from_text(query)
     dense = (await embed_texts([query]))[0]
 
-    r1 = qdr.hybrid_search(dense=dense, sparse=sparse, limit=20, must=filters)
-    r2 = qdr.hybrid_search(dense=dense, sparse=sparse, limit=20, should=filters)
-    fused = reciprocal_rank_fusion([r1, r2])
+    # two passes: must and should to gently bias filters
+    r1 = qdr.hybrid_search(dense=dense, sparse=sparse, limit=k, must=filters or [])
+    r2 = qdr.hybrid_search(dense=dense, sparse=sparse, limit=k, should=filters or [])
+    fused = _rrf([r1, r2])
 
-    # Lightweight heuristic reranker: cosine on embeddings between query and doc text embedding
-    # We approximate by re-embedding doc texts in a small batch (top 20 only)
-    texts = [str((d.payload or {}).get("text", ""))[:2000] for d in fused[:20]]
+    # Lightweight heuristic reranker: cosine between query and doc text embedding
+    texts = [str((d.payload or {}).get("text", ""))[:2000] for d in fused[:k]]
     if texts:
         doc_embs = await embed_texts(texts)
         q = np.array(dense)
-        scored = [
-            (i, _cosine(q, np.array(doc_embs[i]))) for i in range(len(doc_embs))
-        ]
-        order = sorted(range(len(scored)), key=lambda i: scored[i][1], reverse=True)
+        order = sorted(range(len(doc_embs)), key=lambda i: _cosine(q, np.array(doc_embs[i])), reverse=True)
         fused = [fused[i] for i in order]
 
-    return fused[:12]
+    return fused[:k]
 
 
-async def rerank_and_summarize(query: str, docs: List[rest.ScoredPoint]) -> Tuple[str, List[Dict[str, Any]]]:
+async def rerank_and_summarize(query: str, docs: List[rest.ScoredPoint], *, style: str = "concise", extra_context: str = "", max_tokens: int = LLM_MAX_TOKENS) -> Tuple[str, List[Dict[str, Any]]]:
     cfg = load_settings()
-    system = (
-        "You are a precise financial research assistant. Given the user question and a set of snippets, "
-        "select the most relevant 4 snippets, then answer concisely with citations (symbol/date) and include a short risk disclaimer."
-    )
+    if style == "report":
+        system = (
+            "You are an equity analyst. Draft a concise but comprehensive output with sections if appropriate. "
+            "Prefer bullet points. Include inline citations like [SYMBOL YYYY-MM-DD]. End with one risk disclaimer line."
+        )
+    else:
+        system = (
+            "You are a precise financial research assistant. Given the user question and snippets, "
+            "answer in under 8 lines with inline citations like [SYMBOL YYYY-MM-DD]. Add one risk disclaimer line."
+        )
+
     snippets = [
         {
             "id": str(d.id),
-            "text": (d.payload or {}).get("text", ""),
+            "text": str((d.payload or {}).get("text", ""))[:MAX_SNIPPET_CHARS],
             "symbol": (d.payload or {}).get("symbol", ""),
             "date": (d.payload or {}).get("date", ""),
             "type": (d.payload or {}).get("type", ""),
+            "source": (d.payload or {}).get("source", ""),
         }
-        for d in docs
+        for d in docs[:DEFAULT_K]
     ]
 
-    messages = [
-        {"role": "system", "content": system},
-        {
-            "role": "user",
-            "content": f"Question: {query}\nSnippets: {snippets}",
-        },
-    ]
+    user_block = {
+        "role": "user",
+        "content": f"""Question: {query}
+                       Memory:{extra_context}
+                       Snippets: {json.dumps(snippets, ensure_ascii=False)}""",
+    }
 
     headers = {"Authorization": f"Bearer {cfg.openai_api_key}", "Content-Type": "application/json"}
-    payload = {"model": cfg.openai_model, "messages": messages, "temperature": 0.1}
+    payload = {"model": cfg.openai_model, "messages": [{"role": "system", "content": system}, user_block], "temperature": 0.1, "max_tokens": max_tokens}
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
         answer = data["choices"][0]["message"]["content"].strip()
         return answer, snippets
+
+
+def _chunk_text(raw: str, *, max_len: int = MAX_SNIPPET_CHARS) -> List[str]:
+    raw = str(raw).strip()
+    if not raw:
+        return []
+    # simple chunk by sentences/lines, then merge
+    parts: List[str] = []
+    for seg in re.split(r"(?<=[.!?])\s+|\n+", raw):
+        seg = seg.strip()
+        if not seg:
+            continue
+        parts.append(seg)
+    chunks: List[str] = []
+    buf = ""
+    for seg in parts:
+        if len(buf) + 1 + len(seg) <= max_len:
+            buf = (buf + " " + seg).strip()
+        else:
+            if buf:
+                chunks.append(buf)
+            buf = seg[:max_len]
+    if buf:
+        chunks.append(buf)
+    return chunks[:DEFAULT_K]
+
+
+async def ingest_raw(*, tool: str, raw: Any, symbol: str = "", doc_type: str = "", date: str = "") -> List[str]:
+    """Ingest raw API output as small, queryable snippets and return generated IDs."""
+    qdr = HybridQdrant()
+    qdr.ensure_collections()
+    text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+    chunks = _chunk_text(text)
+    items = []
+    ids = []
+    for i, ch in enumerate(chunks):
+        pid = f"{tool}-{symbol or 'NA'}-{i}"
+        ids.append(pid)
+        items.append({
+            "id": pid,
+            "text": ch,
+            "symbol": symbol,
+            "type": doc_type,
+            "date": date,
+            "source": tool,
+        })
+    if items:
+        await qdr.upsert_snippets(items)
+    return ids
+
+
+def fuse(*, tool_name: str, doc_type: str, k: int = DEFAULT_K, snippet_chars: int = MAX_SNIPPET_CHARS):
+    """Decorator to wrap a tool function: ingest its raw output, retrieve+fuse, and summarize.
+    The wrapped tool should accept either 'query' or 'ticker' in args/kwargs."""
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            async def run():
+                # 1) call underlying tool (supports sync/async)
+                res = await func(*args, **kwargs) if asyncio.iscoroutinefunction(func) else func(*args, **kwargs)
+                # 2) derive verify query and symbol
+                verify_q = str(kwargs.get('query') or kwargs.get('ticker') or (args[0] if args else ''))
+                symbol = str(kwargs.get('ticker') or kwargs.get('symbol') or (args[0] if args else ''))
+                # 3) ingest to Qdrant
+                await ingest_raw(tool=tool_name, raw=res, symbol=symbol, doc_type=doc_type)
+                # 4) build filters and retrieve
+                qdr = HybridQdrant()
+                flt = []
+                if symbol:
+                    flt.append(rest.FieldCondition(key='symbol', match=rest.MatchAny(any=[symbol])))
+                if doc_type:
+                    flt.append(rest.FieldCondition(key='type', match=rest.MatchAny(any=[doc_type])))
+                docs = await retrieve(verify_q or symbol or tool_name, filters=flt, k=k)
+                # 5) summarize
+                answer, snippets = await rerank_and_summarize(verify_q or symbol or tool_name, docs)
+                return {
+                    'answer': answer,
+                    'snippets': snippets,
+                    'meta': {'k': k, 'snippet_chars': snippet_chars, 'tool': tool_name, 'type': doc_type}
+                }
+            return asyncio.run(run())
+        return wrapper
+    return decorator

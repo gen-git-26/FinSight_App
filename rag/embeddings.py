@@ -2,30 +2,33 @@
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Optional, Dict, Any
+import time
 
 import httpx
 from qdrant_client.http import models as rest
 
 from utils.config import load_settings
-from utils.cache import FileTTLCache
 
 logger = logging.getLogger(__name__)
+
+# Persistent TTL cache for embeddings
+from utils.cache import FileTTLCache
+EMB_CACHE = FileTTLCache(cache_dir=".cache/embeddings", ttl_seconds=60 * 60 * 24 * 7)
 
 # Try to use Qdrant's helper for sparse embeddings; fall back to empty vectors if not available
 try:  # pragma: no cover - optional dependency path differs by version
     from qdrant_client.fastembed_sparse import DefaultSparseModel  # type: ignore
-
     SPARSE_MODEL = DefaultSparseModel()
     SPARSE_AVAILABLE = True
 except Exception:  # noqa: BLE001
     SPARSE_MODEL = None
     SPARSE_AVAILABLE = False
 
-EMB_CACHE = FileTTLCache(cache_dir=".cache/embeddings", ttl_seconds=60 * 60 * 24 * 7)
-
 
 async def embed_texts(texts: List[str]) -> List[List[float]]:
+    """Get OpenAI embeddings with a tiny in-memory cache.
+    Returns a list of float lists (dense vectors)."""
     cfg = load_settings()
     outputs: List[List[float]] = []
     to_fetch: List[str] = []
@@ -34,9 +37,9 @@ async def embed_texts(texts: List[str]) -> List[List[float]]:
     for idx, t in enumerate(texts):
         cached = EMB_CACHE.get(t)
         if cached:
-            outputs.append(cached)
+            outputs.append(cached)  # use cached vector
         else:
-            outputs.append([])  # placeholder
+            outputs.append([])  # placeholder to fill in later
             mapping.append(idx)
             to_fetch.append(t)
 
