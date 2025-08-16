@@ -1,6 +1,5 @@
 streamlit
 openai
-qdrant-client[fastembed]
 mcp
 python-dotenv
 pydantic
@@ -15,3 +14,4 @@ finnhub-python
 langchain_groq
 websockets
 yfinance
+qdrant_client

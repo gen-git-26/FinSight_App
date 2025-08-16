@@ -3,6 +3,9 @@ import os
 import dotenv
 dotenv.load_dotenv()
 
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 
