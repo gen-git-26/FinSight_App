@@ -1,6 +1,5 @@
 import streamlit as st
-from ango_agent import AngoAgent  # Make sure you have ango_agent installed and available
-from agent.agent import build_agent  # Import your Agent class if needed
+from agent.agent import build_agent  
 
 # Initialize session state for chat history
 if "messages" not in st.session_state:

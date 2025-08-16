@@ -28,16 +28,13 @@ class Settings(BaseModel):
     enable_alpha_vantage: bool
     enable_coinstats: bool
 
-    yahoo_mcp_dir: str = "" 
+
 
     alphavantage_api_key: str
     finnhub_api_key: str
     coinstats_api_key: str
 
-    watchlist: List[str]
-    update_interval_min: int
-    news_provider: str
-    news_window_days: int
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -54,8 +51,6 @@ def load_settings() -> Settings:
         alphavantage_api_key=os.getenv("ALPHAVANTAGE_API_KEY", ""),
         finnhub_api_key=os.getenv("FINNHUB_API_KEY", ""),
         coinstats_api_key=os.getenv("COINSTATS_API_KEY", ""),
-        alpaca_key=os.getenv("ALPACA_KEY", ""),
-        alpaca_secret=os.getenv("ALPACA_SECRET", ""),
     )
 
 

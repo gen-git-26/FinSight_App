@@ -5,28 +5,20 @@ import os
 import finnhub
 import time
 import requests
-from langchain.schema import Document
 from agno.tools import tool
 from agno.tools.yfinance import YFinanceTools
 from utils.config import load_settings
 
 
-
-
-@tool(
-    name="stock_info",
-    description="Provides real-time data for a given stock ticker"
-)
-def stock_info_tool(ticker):
+async def _with_fallback(func, query: str, *args, **kwargs):
     try:
-        return YFinanceTools(
-                stock_price=True,
-                analyst_recommendations=True,
-                company_info=True,
-                company_news=True,
-        ),
+        return await func(*args, **kwargs)
     except Exception as e:
-        return f"Error: {e}"
+        print(f"Error in {func.__name__}: {e}")
+        # Fallback logic can be added here if needed
+        docs = await retrieve(query, filters=None)
+        answer, used = await rerank_and_summarize(query, docs)
+        return {"error": str(e), "answer": answer, "snippets": used}
 
 
 @tool(
@@ -37,7 +29,6 @@ def finnhub_stock_info(query):
     """Provides real-time data."""
     try:
         settings = load_settings()
-        time.sleep(2)
         finnhub_client = finnhub.Client(api_key=settings.finnhub_api_key)
         info = finnhub_client.quote(query)
         return str(info)
@@ -52,7 +43,6 @@ def finnhub_basic_financials(ticker: str, metric: str):
     """Provides basic financial data for a given stock ticker and metric."""
     try:
         settings = load_settings()
-        time.sleep(2)
         finnhub_client = finnhub.Client(api_key=settings.finnhub_api_key)
         info = finnhub_client.company_basic_financials(symbol=ticker, metric=all)
         return str(info)
@@ -66,7 +56,6 @@ def finnhub_basic_financials(ticker: str, metric: str):
 def finnhub_financials_as_reported(query):
     try:
         settings = load_settings()
-        time.sleep(2)
         finnhub_client = finnhub.Client(api_key=settings.finnhub_api_key)
         info = finnhub_client.financials_reported(query)
         return str(info)
@@ -91,62 +80,3 @@ def company_overview(ticker):
 
 
 
-ALPACA_KEY = os.getenv("ALPACA_KEY", "YOUR_KEY")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET", "YOUR_SECRET")
-
-async def _stream_alpaca_news(query: str, timeout: int = 8):
-    settings = load_settings()
-    uri = "wss://stream.data.alpaca.markets/v1beta1/news"
-    results = []
-
-    async with websockets.connect(uri) as ws:
-        # Authenticate
-        await ws.send(json.dumps({"action": "auth", "key": settings.alpaca_key, "secret": settings.alpaca_secret}))
-        await ws.recv()
-
-        # Subscribe to all news
-        await ws.send(json.dumps({"action": "subscribe", "news": ["*"]}))
-
-        try:
-            while True:
-                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
-                if msg.get("T") == "n":
-                    headline = msg.get("headline", "")
-                    summary = msg.get("summary", "")
-                    symbols = msg.get("symbols", [])
-                    url = msg.get("url", "")
-
-                    if query.lower() in headline.lower() or \
-                       query.lower() in summary.lower() or \
-                       query.upper() in symbols:
-                        results.append(Document(
-                            page_content=summary,
-                            metadata={
-                                "headline": headline,
-                                "symbols": symbols,
-                                "source": "Alpaca Real-Time News",
-                                "url": url
-                            }
-                        ))
-                        if len(results) >= 3:
-                            break
-        except asyncio.TimeoutError:
-            pass
-
-    return results
-
-@tool(
-    name="get_real_time_news",
-    description="Fetch real-time news from Alpaca by keyword, ticker, or query. Returns structured documents."
-)
-def real_time_news(query: str):
-    return asyncio.run(_stream_alpaca_news(query))
-
-
-# Custom Retriever for Fusion
-class RealTimeNewsRetriever:
-    def __init__(self):
-        pass
-
-    def get_relevant_documents(self, query: str):
-        return asyncio.run(_stream_alpaca_news(query))
