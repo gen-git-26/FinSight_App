@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple
 
 from agno.tools import tool
 from rag.fusion import fuse
-from mcp.manager import MCPServer, list_tool_names_sync
+from mcp_connection.manager import MCPServer, list_tool_names_sync
 from tools.mcp_bridge import mcp_run
 
 _TICKER_RE = re.compile(r"[A-Z]{1,5}")
@@ -147,3 +147,19 @@ def mcp_auto(query: str, tickers: str = "") -> str:
     hint = [t.strip().upper() for t in re.split(r"[ ,]", tickers) if t.strip()] if tickers else None
     server, tool, args = _route(query, hint)
     return mcp_run(server=server, tool=tool, args_json=json.dumps(args))
+
+def mcp_auto_fn(query: str, tickers: str = "") -> str:
+    hint = [t.strip().upper() for t in re.split(r"[ ,]", tickers) if t.strip()] if tickers else None
+    server, tool, args = _route(query, hint)
+    return mcp_run(server=server, tool=tool, args_json=json.dumps(args))
+
+@tool(
+    name="mcp_auto",
+    description=("Automatically choose an MCP server/tool based on the user's query and run it. "
+                 "Inputs: query (str), optional tickers (comma/space separated). "
+                 "Returns raw text/json and ingests into RAG.")
+)
+@fuse(tool_name="mcp-auto", doc_type="mcp")
+def mcp_auto(query: str, tickers: str = "") -> str:
+    """Automatically choose an MCP server/tool based on the user's query and run it."""
+    return mcp_auto_fn(query, tickers)

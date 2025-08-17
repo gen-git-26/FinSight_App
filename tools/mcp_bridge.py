@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 from agno.tools import tool
 from rag.fusion import fuse
-from mcp.manager import call_sync
+from mcp_connection.manager import call_sync
 
 @tool(
     name="mcp_run",

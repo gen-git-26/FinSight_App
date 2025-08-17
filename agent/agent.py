@@ -1,4 +1,4 @@
-# agent.py
+# agent/agent.py
 import os
 import dotenv
 dotenv.load_dotenv()
@@ -48,12 +48,3 @@ def build_agent():
         ],
         markdown=True,
     )
-
-if __name__ == "__main__":
-    agent = build_agent()
-    if hasattr(agent, "history"):
-        agent.history = []
-    print("Agent built successfully")
-    res = agent.run("what is the current bitcoin price?")
-    print("Agent response:")
-    print(res)
