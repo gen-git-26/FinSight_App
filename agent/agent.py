@@ -50,5 +50,6 @@ if __name__ == "__main__":
     if hasattr(agent, "history"):
         agent.history = []
     print("Agent built successfully")
-    res = agent.run("Summarize TSLA recent performance and key ratios")
+    res = agent.run("what is the current bitcoin price?")
+    print("Agent response:")
     print(res)

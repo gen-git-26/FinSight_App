@@ -46,3 +46,12 @@ def company_overview(ticker: str):
     resp.raise_for_status()
     data = resp.json()
     return data  # dict
+
+# --- Finhub financials new ---
+@tool(name="finnhub_financials_new", description="Get financials as reported for a ticker (Finhub). Input: ticker symbol.")
+@fuse(tool_name="finnhub_financials_new", doc_type="as_reported")
+def finnhub_financials_new(query: str):
+    settings = load_settings()
+    client = finnhub.Client(api_key=settings.finnhub_api_key)
+    info = client.general_news(query,'general', min_id=0)
+    return str(info)

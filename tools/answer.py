@@ -16,6 +16,7 @@ from tools.tools import (
     finnhub_basic_financials,
     finnhub_financials_as_reported,
     company_overview,
+    finnhub_financials_new
 )
 from memory.manager import fetch_memory, persist_turn
 
@@ -52,6 +53,7 @@ def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
             finnhub_basic_financials(t, metric="valuation")
             finnhub_basic_financials(t, metric="growth")
             finnhub_financials_as_reported(t)
+            finnhub_financials_new(t)
             company_overview(t)
         except Exception:
             pass
