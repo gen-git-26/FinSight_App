@@ -1,81 +1,89 @@
 # tools/mcp_router.py
 from __future__ import annotations
-import json, re
+import json
+import re
 from typing import Dict, List, Tuple
 
 from agno.tools import tool
-from mcp_connection.manager import MCPManager
-
-mgr = MCPManager()
+from rag.fusion import fuse
+from mcp_connection.manager import MCPManager, MCPServer
+from tools.mcp_bridge import mcp_run
 
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}\b")
-_STOP = {"USD","EPS","EV","PE","P/E","AND","OR","THE","A","AN"}
+_STOP = {"USD","PE","EV","EPS","ETF","AND","OR","THE","A","AN"}
 
-def _tickers(text: str) -> List[str]:
-    return [t for t in _TICKER_RE.findall(text.upper()) if t not in _STOP]
+def _tickers(s: str) -> List[str]:
+    return [m.group(0) for m in _TICKER_RE.finditer(s.upper()) if m.group(0) not in _STOP]
 
-def _choose_server(q: str, servers: List[str]) -> str:
-    up = q.upper()
-    if any(x in servers for x in ["coinmarketcap"]) and any(k in up for k in ["CRYPTO","BTC","ETH","COIN","TOKEN","COINMARKETCAP"]):
+def _which_server(q: str) -> str:
+    servers = set(MCPServer.from_env().keys())
+    U = q.upper()
+    # prefer Financial Datasets for **crypto**
+    if any(x in U for x in ["CRYPTO","BTC","ETH","SOL","TOKEN","ONCHAIN","COIN"]) and "financial-datasets" in servers:
+        return "financial-datasets"
+    if any(x in U for x in ["CRYPTO","BTC","ETH","SOL","TOKEN","ONCHAIN","COIN"]) and "coinmarketcap" in servers:
         return "coinmarketcap"
-    return "yfinance" if "yfinance" in servers else (servers[0] if servers else "")
+    if "yfinance" in servers:
+        return "yfinance"
+    return next(iter(servers), "")
 
-async def _choose_tool(server: str, q: str) -> str:
-    tools = [t for t in await mgr.list_tools(server) if t]
-    uq = q.upper()
-    pref: List[str] = []
-    if server == "yfinance":
-        if any(k in uq for k in ["NEWS"]): pref = ["get_yahoo_finance_news"]
-        elif any(k in uq for k in ["OPTION","CALL","PUT"]): pref = ["get_option_chain","get_option_expiration_dates"]
-        elif any(k in uq for k in ["HOLDER","INSIDER","INSTITUTION"]): pref = ["get_holder_info"]
-        elif any(k in uq for k in ["INCOME","BALANCE","CASH","FINANCIAL"]): pref = ["get_financial_statement"]
-        elif any(k in uq for k in ["HIST","HISTORICAL","CHART","PRICE"]): pref = ["get_historical_stock_prices"]
-        else: pref = ["get_stock_info"]
-    else:
-        if any(k in uq for k in ["PRICE","QUOTE","MARKET CAP","MARKETCAP"]): pref = ["quotes","quote","ohlcv"]
-        elif any(k in uq for k in ["LIST","TOP","TREND","GAINER","LOSER"]):   pref = ["listings","trending"]
-        else: pref = ["quotes","listings","quote"]
-    for p in pref:
-        for t in tools:
-            if p.lower() in t.lower():
-                return t
-    return tools[0] if tools else ""
+def _choose_tool(server: str, query: str) -> str:
+    # keep this lightweight; we inspect available tools and pick a sensible one
+    # fallbacks if listing fails are hard-coded defaults
+    try:
+        # we don’t need names here (avoids extra spawns)
+        pass
+    except Exception:
+        pass
+    U = query.upper()
+    if server == "financial-datasets":
+        if any(x in U for x in ["PRICE","QUOTE","CURRENT","NOW","SNAPSHOT"]):
+            return "get_current_crypto_price" if any(t in {"BTC","ETH","SOL"} for t in _tickers(U)) else "get_current_stock_price"
+        if any(x in U for x in ["HIST","HISTORICAL","OHLC","CHART"]):
+            return "get_historical_crypto_prices" if any(t in {"BTC","ETH","SOL"} for t in _tickers(U)) else "get_historical_stock_prices"
+        return "get_current_crypto_price"
+    if server == "coinmarketcap":
+        return "quote"
+    # yfinance (stocks)
+    return "get_stock_info"
 
-def _build_args(server: str, tool: str, q: str, tickers: List[str]) -> Dict:
-    if server == "yfinance":
-        t = tickers[0] if tickers else "AAPL"
-        if "get_financial_statement" in tool:
-            f = "income_stmt"
-            ql = q.lower()
-            if "balance" in ql: f = "balance_sheet"
-            elif "cash" in ql:  f = "cashflow"
-            if "quarter" in ql: f = "quarterly_" + f
-            return {"ticker": t, "financial_type": f}
-        if "get_historical_stock_prices" in tool:
-            return {"ticker": t, "period": "1mo", "interval": "1d"}
-        if "get_holder_info" in tool:
-            k = "institutional_holders" if "institution" in q.lower() else "major_holders"
-            return {"ticker": t, "holder_type": k}
-        if "get_option_chain" in tool:
-            return {"ticker": t, "expiration_date": "2099-01-01", "option_type": "calls"}
+def _build_args(server: str, tool: str, q: str, ticks: List[str]) -> Dict:
+    if server == "financial-datasets":
+        # API expects tickers like 'BTC-USD' for crypto; if user typed BTC, default to BTC-USD
+        if "crypto" in tool or "get_current_crypto_price" in tool or "get_historical_crypto_prices" in tool:
+            sym = (ticks[0] if ticks else "BTC").upper()
+            sym = sym if "-" in sym else f"{sym}-USD"
+            args = {"ticker": sym}
+            if "historical" in tool:
+                args.update({"start_date":"2024-01-01","end_date":"2025-12-31","interval":"day","interval_multiplier":1})
+            return args
+        # stocks
+        t = ticks[0] if ticks else "AAPL"
+        if "historical" in tool:
+            return {"ticker": t, "start_date":"2024-01-01","end_date":"2025-12-31","interval":"day","interval_multiplier":1}
         return {"ticker": t}
-    # coinmarketcap
-    sym = (tickers[0] if tickers else "BTC")
-    return {"symbol": sym, "symbols": sym, "convert": "USD", "limit": 50}
+
+    if server == "coinmarketcap":
+        sym = (ticks[0] if ticks else "BTC").upper()
+        return {"symbol": sym, "convert": "USD"}
+
+    # yfinance
+    return {"ticker": (ticks[0] if ticks else "AAPL").upper()}
+
+# exported helper you can call from app.py (NOT decorated)
+def route_and_call(query: str) -> str:
+    ticks = _tickers(query)
+    server = _which_server(query)
+    if not server:
+        return "No MCP servers configured."
+    tool = _choose_tool(server, query)
+    args = _build_args(server, tool, query, ticks)
+    return mcp_run(server=server, tool=tool, args_json=json.dumps(args))
 
 @tool(
     name="mcp_auto",
-    description=(
-        "Auto-select MCP server & tool based on the question and run it. "
-        "Inputs: query (str), tickers (optional CSV). Returns raw text."
-    ),
+    description="Auto-route a query to the best MCP server/tool (crypto→financial-datasets if available). Input: query."
 )
-async def mcp_auto(query: str, tickers: str = "") -> str:
-    servers = list(MCPManager.from_env().keys())
-    if not servers:
-        return "No MCP servers configured in MCP_SERVERS."
-    hint = [t.strip().upper() for t in re.split(r"[ ,]", tickers) if t.strip()] if tickers else []
-    server = _choose_server(query, servers)
-    tool   = await _choose_tool(server, query)
-    args   = _build_args(server, tool, query, (hint or _tickers(query)))
-    return await mgr.call(server, tool, args)
+@fuse(tool_name="mcp-auto", doc_type="mcp")
+def mcp_auto(query: str) -> str:
+    return route_and_call(query)

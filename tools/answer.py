@@ -20,6 +20,8 @@ from tools.tools import (
 )
 from memory.manager import fetch_memory, persist_turn
 
+from qdrant_client.http import models as rest #add 6:59
+
 # Regex to match common stock ticker patterns, including suffixes like .US or -US
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]|-[A-Z]{1,3})?\b")
 # Common stop words that are not useful as tickers
@@ -59,9 +61,22 @@ def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
             pass
 
     # 2) Retrieve across all types, optionally filter by symbol(s)
+    # flt: List[rest.FieldCondition] = []
+    # if tickers:
+    #     flt.append(rest.FieldCondition(key='symbol', match=rest.MatchAny(any=tickers[:3])))
+    # docs = asyncio.run(retrieve(query, filters=flt, k=24))
+
     flt: List[rest.FieldCondition] = []
     if tickers:
-        flt.append(rest.FieldCondition(key='symbol', match=rest.MatchAny(any=tickers[:3])))
+        flt.append(rest.FieldCondition(key="symbol", match=rest.MatchAny(any=tickers[:3])))
+
+    flt.append(
+        rest.FieldCondition(
+            key="type",
+            match=rest.MatchAny(any=["quote","overview","basic_financials","as_reported","mcp"])
+        )
+    )
+
     docs = asyncio.run(retrieve(query, filters=flt, k=24))
 
     # 3) Bring in user memory context
