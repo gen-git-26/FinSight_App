@@ -16,6 +16,7 @@ from rag.embeddings import embed_texts, sparse_from_text
 from rag.qdrant_client import HybridQdrant
 from utils.config import load_settings
 
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_K = 12

@@ -50,5 +50,5 @@ if __name__ == "__main__":
     if hasattr(agent, "history"):
         agent.history = []
     print("Agent built successfully")
-    res = agent.run("Summarize TSLA recent performance and key ratios; keep it short")
+    res = agent.run("Summarize TSLA recent performance and key ratios")
     print(res)
