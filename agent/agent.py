@@ -18,6 +18,8 @@ from tools.tools import (
 )
 from tools.answer import answer
 from utils.logging import setup_logging
+from tools.mcp_bridge import mcp_run
+from tools.mcp_router import mcp_auto
 
 def build_agent():
     settings = load_settings()
@@ -40,7 +42,9 @@ def build_agent():
             finnhub_basic_financials,
             finnhub_financials_as_reported,
             company_overview,
-            answer
+            answer,
+            mcp_run,
+            mcp_auto,
         ],
         markdown=True,
     )
