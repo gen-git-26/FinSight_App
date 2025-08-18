@@ -1,4 +1,4 @@
-# tools/mcp_router.py
+# tools/mcp_router.py 
 from __future__ import annotations
 import json
 import re
@@ -8,7 +8,8 @@ from datetime import datetime
 from agno.tools import tool
 from rag.fusion import fuse
 from mcp_connection.manager import MCPManager, MCPServer
-from tools.mcp_bridge import mcp_run
+
+
 
 # Enhanced ticker detection
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z]{1,3})?\b")
@@ -175,16 +176,18 @@ def route_and_call(query: str) -> str:
             return "No suitable MCP server found"
         
         # Choose optimal tool
-        tool = _choose_optimal_tool(server, query, data_type)
+        tool_name = _choose_optimal_tool(server, query, data_type)
         
         # Build smart arguments
-        args = _build_smart_args(server, tool, query, tickers)
+        args = _build_smart_args(server, tool_name, query, tickers)
         
         # Add routing metadata to response
-        routing_info = f"Route: {server}/{tool} | Type: {data_type} | Crypto: {is_crypto} | Tickers: {tickers}"
+        routing_info = f"Route: {server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | Tickers: {tickers}"
         
-        # Execute the call
-        result = mcp_run(server=server, tool=tool, args_json=json.dumps(args))
+        # Execute the call using MCPManager directly
+        manager = MCPManager()
+        result = manager.call_sync(server, tool_name, args)
+        
         
         # Return with routing transparency
         return f"{routing_info}\n\n{result}"

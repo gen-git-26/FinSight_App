@@ -13,8 +13,23 @@ from mcp_connection.manager import MCPManager
 )
 @fuse(tool_name="mcp", doc_type="mcp")
 def mcp_run(server: str, tool: str, args_json: str = "{}") -> str:
+    """Execute MCP tool with proper error handling."""
     try:
-        args: Dict[str, Any] = json.loads(args_json) if args_json else {}
+        # Parse arguments
+        if isinstance(args_json, str):
+            args: Dict[str, Any] = json.loads(args_json) if args_json else {}
+        elif isinstance(args_json, dict):
+            args = args_json
+        else:
+            args = {}
+        
+        # Create manager and execute call
+        manager = MCPManager()
+        result = manager.call_sync(server, tool, args)
+        
+        return result
+        
+    except json.JSONDecodeError as e:
+        return f"MCP call failed - Invalid JSON arguments: {e}"
     except Exception as e:
-        raise ValueError(f"args_json must be JSON: {e}")
-    return MCPManager.call_sync(server, tool, args)
+        return f"MCP call failed: {str(e)}"
