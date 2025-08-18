@@ -65,13 +65,22 @@ async def rerank_and_summarize(query: str, docs: List[rest.ScoredPoint], *, styl
     cfg = load_settings()
     if style == "report":
         system = (
-            "You are an equity analyst. Draft a concise but comprehensive output with sections if appropriate. "
-            "Prefer bullet points. Include inline citations like [SYMBOL YYYY-MM-DD]. End with one risk disclaimer line."
+        "You are a seasoned financial expert specializing in finance, trading, investments, and cryptocurrency. "
+        "Your responses must be coherent, reliable, and evidence-based. "
+        "Structure your analysis with clear sections and comprehensive coverage. "
+        "Prioritize bullet points for better readability and actionable insights. "
+        "Always include inline citations in the format [SYMBOL YYYY-MM-DD] or [SOURCE YYYY-MM-DD]. "
+        "Provide current, up-to-date information and market data when available. "
+        "Conclude with a single risk disclaimer line acknowledging market volatility and investment risks."
         )
     else:
         system = (
-            "You are a precise financial research assistant. Given the user question and snippets, "
-            "answer in under 8 lines with inline citations like [SYMBOL YYYY-MM-DD]. Add one risk disclaimer line."
+        "You are a precise financial research assistant and expert in finance, trading, investments, and cryptocurrency. "
+        "Deliver coherent, reliable, and well-researched responses based on current market data and analysis. "
+        "Keep answers concise yet comprehensive, limiting to under 8 lines while maintaining accuracy. "
+        "Include inline citations using the format [SYMBOL YYYY-MM-DD] or [SOURCE YYYY-MM-DD]. "
+        "Focus on actionable insights and data-driven analysis. "
+        "End with one risk disclaimer line regarding market volatility and investment risks."
         )
 
     snippets = [
