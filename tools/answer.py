@@ -18,20 +18,17 @@ from tools.tools import (
     company_overview,
     finnhub_financials_new
 )
+from tools.mcp_router import route_and_call
 from memory.manager import fetch_memory, persist_turn
+from mcp_connection.manager import MCPServer
 
-from qdrant_client.http import models as rest #add 6:59
-
-# Regex to match common stock ticker patterns, including suffixes like .US or -US
+# Regex to match common stock ticker patterns
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]|-[A-Z]{1,3})?\b")
-# Common stop words that are not useful as tickers
 _STOP = { 'AND','THE','FOR','WITH','OVER','FROM','THIS','THAT','INTO','YOUR','US','USA','NYSE','NASDAQ','SP','ETF','PE','EV','EBITDA','EPS','CAGR','ROE','P','E' }
-
 
 def _extract_tickers(text: str) -> List[str]:
     cands = _TICKER_RE.findall(text or "")
     return [c for c in cands if c not in _STOP]
-
 
 def _detect_style(q: str, explicit: str = "") -> str:
     if explicit:
@@ -41,52 +38,141 @@ def _detect_style(q: str, explicit: str = "") -> str:
         return "report"
     return "concise"
 
-@tool(name="answer", description="General-purpose Fusion RAG answerer. Input: free-form question; optional ticker(s). Dynamically fetches data, retrieves, fuses, and summarizes.")
+def _should_use_mcp(query: str) -> bool:
+    """Determine if MCP should be prioritized for this query."""
+    q_lower = query.lower()
+    
+    # Real-time indicators
+    realtime_keywords = ["current", "now", "latest", "today", "live", "real-time", "quote", "price now"]
+    if any(keyword in q_lower for keyword in realtime_keywords):
+        return True
+    
+    # Crypto indicators
+    crypto_keywords = ["crypto", "bitcoin", "btc", "ethereum", "eth", "coin", "token"]
+    if any(keyword in q_lower for keyword in crypto_keywords):
+        return True
+    
+    # Recent/fresh data indicators
+    fresh_keywords = ["recent", "breaking", "news", "announcement", "update"]
+    if any(keyword in q_lower for keyword in fresh_keywords):
+        return True
+    
+    return False
+
+@tool(name="answer", description="Enhanced Fusion RAG answerer with intelligent MCP integration. Automatically chooses between live MCP data and cached data. Input: free-form question; optional ticker(s) and style.")
 def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
-    # 0) resolve style and tickers
+    """
+    Enhanced answer tool that intelligently combines MCP live data with RAG retrieval.
+    Prioritizes fresh data when appropriate, falls back to cached data when needed.
+    """
+    
+    # 0) Resolve style and tickers
     style = _detect_style(query, style)
     tickers = list(dict.fromkeys(([t.strip().upper() for t in (ticker.split() if ticker else [])] + _extract_tickers(query))))
-
-    # 1) If tickers found, refresh cache by calling data tools (each is wrapped by Fusion and ingests snippets)
-    for t in tickers[:3]:  # limit to 3 to cap latency
+    
+    # 1) Determine data strategy
+    should_use_mcp = _should_use_mcp(query)
+    available_mcp_servers = MCPServer.from_env()
+    
+    mcp_data_attempted = False
+    mcp_success = False
+    
+    # 2) Try MCP first if conditions are met
+    if should_use_mcp and available_mcp_servers:
         try:
-            finnhub_stock_info(t)
-            finnhub_basic_financials(t, metric="price")
-            finnhub_basic_financials(t, metric="valuation")
-            finnhub_basic_financials(t, metric="growth")
-            finnhub_financials_as_reported(t)
-            finnhub_financials_new(t)
-            company_overview(t)
-        except Exception:
-            pass
+            print(f"Attempting MCP data fetch for: {query}")
+            mcp_result = route_and_call(query)
+            mcp_data_attempted = True
+            
+            # Check if MCP call was successful (not an error message)
+            if not mcp_result.startswith("MCP call:"):
+                mcp_success = True
+                print("MCP data fetch successful")
+            else:
+                print(f"MCP returned error: {mcp_result}")
+                
+        except Exception as e:
+            print(f"MCP call failed: {e}")
+            mcp_data_attempted = True
+    
+    # 3) Refresh cache with static tools if needed (especially if MCP failed or not used)
+    if not mcp_success and tickers:
+        print("Refreshing static data cache...")
+        for t in tickers[:3]:  # limit to 3 to cap latency
+            try:
+                finnhub_stock_info(t)
+                finnhub_basic_financials(t, metric="price")
+                finnhub_basic_financials(t, metric="valuation") 
+                finnhub_basic_financials(t, metric="growth")
+                finnhub_financials_as_reported(t)
+                company_overview(t)
+            except Exception as e:
+                print(f"Static tool error for {t}: {e}")
+                pass
 
-    # 2) Retrieve across all types, optionally filter by symbol(s)
-    # flt: List[rest.FieldCondition] = []
-    # if tickers:
-    #     flt.append(rest.FieldCondition(key='symbol', match=rest.MatchAny(any=tickers[:3])))
-    # docs = asyncio.run(retrieve(query, filters=flt, k=24))
-
+    # 4) Retrieve from vector store with enhanced filters
     flt: List[rest.FieldCondition] = []
     if tickers:
         flt.append(rest.FieldCondition(key="symbol", match=rest.MatchAny(any=tickers[:3])))
 
+    # Include MCP data in search if we have servers configured
+    doc_types = ["quote", "overview", "basic_financials", "as_reported"]
+    if available_mcp_servers:
+        doc_types.append("mcp")
+        
     flt.append(
         rest.FieldCondition(
             key="type",
-            match=rest.MatchAny(any=["quote","overview","basic_financials","as_reported","mcp"])
+            match=rest.MatchAny(any=doc_types)
         )
     )
 
     docs = asyncio.run(retrieve(query, filters=flt, k=24))
+    print(f"Retrieved {len(docs)} documents from vector store")
 
-    # 3) Bring in user memory context
+    # 5) Bring in user memory context
     mem_ctx = asyncio.run(fetch_memory(query=query, k=3))
 
-    # 4) Summarize with dynamic style and extra memory context
-    max_tok = 900 if style == "report" else 512
-    answer, snippets = asyncio.run(rerank_and_summarize(query, docs, style=style, extra_context=mem_ctx, max_tokens=max_tok))
+    # 6) Enhanced context with MCP status
+    extra_context = mem_ctx
+    if mcp_data_attempted:
+        mcp_status = "Live data included" if mcp_success else "Live data unavailable, using cached data"
+        extra_context += f"\n[Data Source Status: {mcp_status}]"
+        
+        if not mcp_success and should_use_mcp:
+            extra_context += "\n[Note: Query requested live data but MCP servers unavailable - using most recent cached data]"
 
-    # 5) Persist this turn in long-term memory
-    asyncio.run(persist_turn(user_text=query, assistant_text=answer))
+    # 7) Dynamic token allocation based on style and data freshness
+    if style == "report":
+        max_tok = 1200 if mcp_success else 900  # More tokens for live data reports
+    else:
+        max_tok = 650 if mcp_success else 512   # More tokens for live data responses
 
-    return {"answer": answer, "snippets": snippets, "meta": {"style": style, "tickers": tickers}}
+    # 8) Summarize with enhanced prompt
+    answer_text, snippets = asyncio.run(rerank_and_summarize(
+        query, 
+        docs, 
+        style=style, 
+        extra_context=extra_context, 
+        max_tokens=max_tok
+    ))
+
+    # 9) Persist this turn in long-term memory
+    asyncio.run(persist_turn(user_text=query, assistant_text=answer_text))
+
+    # 10) Enhanced metadata
+    metadata = {
+        "style": style, 
+        "tickers": tickers,
+        "mcp_attempted": mcp_data_attempted,
+        "mcp_success": mcp_success,
+        "available_servers": list(available_mcp_servers.keys()),
+        "docs_retrieved": len(docs),
+        "should_use_mcp": should_use_mcp
+    }
+
+    return {
+        "answer": answer_text, 
+        "snippets": snippets, 
+        "meta": metadata
+    }
