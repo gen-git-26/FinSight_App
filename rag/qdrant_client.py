@@ -10,7 +10,7 @@ from qdrant_client.http import models as rest
 from utils.config import load_settings
 
 
-# --- Helper: Reciprocal Rank Fusion (קטן ומקומי) ---
+
 def _rrf(lists: List[List[rest.ScoredPoint]], k: int = 60) -> List[rest.ScoredPoint]:
     scores: Dict[str, float] = {}
     pick: Dict[str, rest.ScoredPoint] = {}
@@ -23,7 +23,7 @@ def _rrf(lists: List[List[rest.ScoredPoint]], k: int = 60) -> List[rest.ScoredPo
     return [pick[pid] for pid, _ in order]
 
 
-# --- Helper: נרמול מזהה ל־Qdrant (מספר או UUID תקני) ---
+
 def _as_point_id(value: Any) -> Union[int, str]:
     """
     Accepts int, numeric-string, UUID-string, or arbitrary string.
@@ -62,7 +62,7 @@ class HybridQdrant:
         self.collection = cfg.qdrant_collection
         self._ensured = False
 
-    # --------- יצירת קולקציה/אינדקסים ---------
+    
     def ensure_collections(self, dense_dim: Optional[int] = None) -> None:
         """
         יוצר/מוודא קולקציה עם וקטור צפוף 'text' וספראז 'bm25' ואינדקסי payload.
@@ -73,7 +73,7 @@ class HybridQdrant:
 
         colls = [c.name for c in self.client.get_collections().collections]
         if self.collection in colls:
-            # קיימת: רק לוודא אינדקסים לשדות
+           
             for field, schema in [
                 ("symbol", rest.PayloadSchemaType.KEYWORD),
                 ("type", rest.PayloadSchemaType.KEYWORD),
@@ -85,14 +85,14 @@ class HybridQdrant:
                         self.collection, field_name=field, field_schema=schema
                     )
                 except Exception:
-                    # כנראה כבר קיים – מתעלמים
+                
                     pass
             self._ensured = True
             return
 
-        # לא קיימת: יוצרים מאפס
+       
         if dense_dim is None:
-            # ברירת מחדל בטוחה ל-text-embedding-3-large
+          
             dense_dim = 3072
 
         self.client.recreate_collection(
@@ -105,7 +105,7 @@ class HybridQdrant:
             },
         )
 
-        # אינדקסים על שדות המטא-דאטה
+        # Create payload indices for common fields
         for field, schema in [
             ("symbol", rest.PayloadSchemaType.KEYWORD),
             ("type", rest.PayloadSchemaType.KEYWORD),
@@ -123,12 +123,7 @@ class HybridQdrant:
 
     # --------- Upsert ---------
     async def upsert_snippets(self, items: List[Dict[str, Any]]) -> None:
-        """
-        מצפה לרשומות בפורמט:
-        { id?, text, symbol?, type?, date?, source?, slug?, user? }
-        בונה גם וקטור צפוף ('text') וגם sparse ('bm25').
-        """
-        from rag.embeddings import embed_texts, sparse_from_text  # lazy import למניעת מעגליות
+        from rag.embeddings import embed_texts, sparse_from_text  
 
         self.ensure_collections()
 
@@ -138,7 +133,7 @@ class HybridQdrant:
         points: List[rest.PointStruct] = []
         for i, it in enumerate(items):
             raw_id = it.get("id") or f"snip-{i}"
-            pid = _as_point_id(raw_id)  # <-- כאן ההמרה הקריטית למזהה חוקי
+            pid = _as_point_id(raw_id)  
             payload = {
                 "text": texts[i],
                 "symbol": it.get("symbol", ""),
@@ -247,6 +242,5 @@ class HybridQdrant:
             with_payload=True,
         )
         fused_should = _rrf([res_dense_should, res_sparse_should])
-
-        # איחוי סופי של שני המצבים
+        # Final fusion of MUST and SHOULD
         return _rrf([fused_must, fused_should])[:limit]

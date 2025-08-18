@@ -30,7 +30,7 @@ class Settings(BaseModel):
     enable_coinstats: bool
 
 
-
+    financial_datasets_api_key: str
     alphavantage_api_key: str
     finnhub_api_key: str
     coinstats_api_key: str
@@ -52,6 +52,7 @@ def load_settings() -> Settings:
         alphavantage_api_key=os.getenv("ALPHAVANTAGE_API_KEY", ""),
         finnhub_api_key=os.getenv("FINNHUB_API_KEY", ""),
         coinstats_api_key=os.getenv("COINSTATS_API_KEY", ""),
+        financial_datasets_api_key=os.getenv("FINANCIAL_DATASETS_API_KEY","")
     )
 
 
