@@ -81,15 +81,14 @@ def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     mcp_success = False
     
     # 2) Try MCP first if conditions are met
-    # mcp_payload = None  # will hold fused output when available
+    mcp_payload = None  
     if should_use_mcp and available_mcp_servers:
         try:
             print(f"Attempting MCP data fetch for: {query}")
             # IMPORTANT: call the TOOL, not the raw router
-            mcp_pack = mcp_auto(query)  # <- this is decorated with @fuse and INGESTS 'mcp' docs
+            mcp_payload = mcp_auto(query) 
             mcp_data_attempted = True
 
-            # Treat as success if no exception; we ignore mcp_pack["answer"] here
             mcp_success = True
             print("MCP data fetch successful and ingested into vector store")
 
@@ -174,8 +173,8 @@ def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     "tickers": tickers,
     "mcp_attempted": mcp_data_attempted,
     "mcp_success": mcp_success,
-    "available_servers": list(available_mcp_servers.keys()),
-    "docs_retrieved": len(docs) if not mcp_success else len(snippets),
+    "available_servers": list((available_mcp_servers or {}).keys()),
+    "docs_retrieved": len(snippets) if mcp_success else len(docs),
     "should_use_mcp": should_use_mcp
 }
 
