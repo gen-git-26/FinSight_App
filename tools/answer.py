@@ -81,21 +81,22 @@ def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     mcp_success = False
     
     # 2) Try MCP first if conditions are met
-    mcp_payload = None  # will hold fused output when available
+    # mcp_payload = None  # will hold fused output when available
     if should_use_mcp and available_mcp_servers:
         try:
             print(f"Attempting MCP data fetch for: {query}")
-            # Use the fused tool, not the raw router
-            mcp_payload = mcp_auto(query=query)  # returns {'answer', 'snippets', 'meta': {...}}
+            # IMPORTANT: call the TOOL, not the raw router
+            mcp_pack = mcp_auto(query)  # <- this is decorated with @fuse and INGESTS 'mcp' docs
             mcp_data_attempted = True
-            if isinstance(mcp_payload, dict) and mcp_payload.get("answer"):
-                mcp_success = True
-                print("MCP data fetch (fused) successful")
-            else:
-                print("MCP fused call returned no answer; will fall back")
+
+            # Treat as success if no exception; we ignore mcp_pack["answer"] here
+            mcp_success = True
+            print("MCP data fetch successful and ingested into vector store")
+
         except Exception as e:
-            print(f"MCP fused call failed: {e}")
+            print(f"MCP call failed: {e}")
             mcp_data_attempted = True
+            mcp_success = False
     
     
     # 3) Refresh cache with static tools if needed (especially if MCP failed or not used)

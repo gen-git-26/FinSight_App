@@ -11,7 +11,7 @@ dotenv.load_dotenv()
 from agent.agent import build_agent
 from mcp_connection.manager import MCPServer
 from mcp_connection.startup import startup_mcp_servers, get_manager
-from tools.mcp_router import route_and_call
+from tools.mcp_router import route_and_call   # (כבר קיים אצלך)
 
 st.set_page_config(page_title="FinSight", layout="wide")
 st.title("⚡ FinSight")
@@ -115,7 +115,18 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Generate response
+    # NEW: הרצת MCP גולמי והצגה שקופה למשתמש (לפני ה-Agent)
+    try:
+        mcp_raw = route_and_call(prompt)  # תוצאה זהה למה שאת מריצה בטרמינל
+    except Exception as e:
+        mcp_raw = f"Route error: {e}"
+
+    # NEW: הצגת התוצאה החיה (raw) כדי שתוכלי לראות בדיוק מה חזר מהשרת
+    with st.expander("🔌 Live MCP (raw)"):
+        # לא תמיד זה JSON; לפעמים זה טקסט עם JSON בפנים, אז נציג כטקסט רגיל
+        st.code(mcp_raw, language="json")
+
+    # Generate response (Agent synthesis over RAG, שאמור כעת לכלול גם mcp דרך mcp_auto)
     with st.chat_message("assistant"):
         with st.spinner("Analyzing and fetching data..."):
             try:
