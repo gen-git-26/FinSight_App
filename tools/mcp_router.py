@@ -1,8 +1,11 @@
 # tools/mcp_router.py
 from __future__ import annotations
 
-import json
+import os
 import re
+import json
+import requests
+from functools import lru_cache
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any
 
@@ -11,15 +14,22 @@ from rag.fusion import fuse
 from mcp_connection.manager import MCPManager, MCPServer
 
 # -----------------------------
-# Heuristics
+# Constants & heuristics
 # -----------------------------
-_TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z]{1,3})?\b")
-_CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "ADA", "DOT", "MATIC", "AVAX", "LINK", "UNI", "AAVE"}
+_TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z]{1,6})?\b")
 _STOP = {
     "USD","PE","EV","EPS","ETF","AND","OR","THE","A","AN","IS","ARE","FOR","TO","OF","IN",
-    "PRICE","NEWS","OPTIONS","CHAIN","PUTS","CALLS"  # חדש
+    "PRICE","NEWS","OPTIONS","CHAIN","PUTS","CALLS",
+    "WHAT","ABOUT","SHOW","ME","RECENT","UPGRADES","DOWNGRADES","PLEASE","GET","GIVE","WITH",
 }
+_CRYPTO_SYMBOLS = {
+    "BTC","ETH","SOL","ADA","DOT","MATIC","AVAX","LINK","UNI","AAVE",
+    "XRP","DOGE","LTC","BCH","ATOM","ETC","FIL","XLM","NEAR","APT","ARB",
+}
+
 VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+# Known toolsets for each MCP server (used to intersect with dynamic discovery)
 KNOWN_TOOLSETS: Dict[str, List[str]] = {
     "yfinance": [
         "get_stock_info",
@@ -41,21 +51,26 @@ KNOWN_TOOLSETS: Dict[str, List[str]] = {
     "coinmarketcap": ["quote"],
 }
 
+# -----------------------------
+# Tokenization & detection
+# -----------------------------
+def _tokenize_words(text: str) -> List[str]:
+    return re.findall(r"[A-Za-z0-9\.\-]+", (text or ""))
 
-
-def _extract_tickers(text: str) -> List[str]:
+def _extract_tickers_regex_only(text: str) -> List[str]:
     matches = _TICKER_RE.findall((text or "").upper())
     return [m for m in matches if m not in _STOP]
 
-
 def _detect_crypto_intent(query: str) -> bool:
     q_upper = (query or "").upper()
-    crypto_keywords = ["CRYPTO", "BITCOIN", "BTC", "ETH", "ETHEREUM", "COIN", "TOKEN", "BLOCKCHAIN", "DEFI"]
+    crypto_keywords = [
+        "CRYPTO","BITCOIN","BTC","ETH","ETHEREUM","COIN","TOKEN","BLOCKCHAIN","DEFI",
+        "XRP","DOGE","LTC","BCH","ALTCOIN","ALTCOINS"
+    ]
     if any(k in q_upper for k in crypto_keywords):
         return True
-    tickers = _extract_tickers(query)
-    return any(t in _CRYPTO_SYMBOLS for t in tickers)
-
+    tickers = _extract_tickers_regex_only(query)
+    return any(t.replace("-USD","") in _CRYPTO_SYMBOLS for t in tickers)
 
 def _detect_data_type(query: str) -> str:
     q_lower = (query or "").lower()
@@ -63,13 +78,118 @@ def _detect_data_type(query: str) -> str:
         return "realtime"
     if any(k in q_lower for k in ["historical", "history", "past", "chart", "trend", "over time", "since"]):
         return "historical"
-    if any(k in q_lower for k in ["news", "earnings", "report", "announcement", "fundamentals"]):
+    if any(k in q_lower for k in ["news", "earnings", "report", "announcement", "fundamentals", "upgrade", "downgrade"]):
         return "fundamental"
     if any(k in q_lower for k in ["price", "value", "cost", "trading"]):
         return "realtime"
     return "general"
 
+# -----------------------------
+# Dynamic symbol resolution
+# -----------------------------
+@lru_cache(maxsize=512)
+def _alpha_vantage_symbol_search(query: str) -> Optional[str]:
+    api_key = os.getenv("ALPHAVANTAGE_API_KEY") or os.getenv("ALPHA_VANTAGE_API_KEY")
+    if not api_key:
+        return None
+    try:
+        url = "https://www.alphavantage.co/query"
+        params = {"function": "SYMBOL_SEARCH", "keywords": query, "apikey": api_key}
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json() or {}
+        best = (data.get("bestMatches") or [])
+        def score(m):
+            region = (m.get("4. region") or "").upper()
+            t = (m.get("1. symbol") or "")
+            s = float((m.get("9. matchScore") or "0") or 0)
+            pref = 1.0 if region.startswith("UNITED STATES") else 0.0
+            return (pref, s, -len(t))
+        if best:
+            best.sort(key=score, reverse=True)
+            return best[0].get("1. symbol")
+    except Exception:
+        pass
+    return None
 
+@lru_cache(maxsize=512)
+def _finnhub_symbol_lookup(query: str) -> Optional[str]:
+    try:
+        from utils.config import load_settings
+        import finnhub
+        settings = load_settings()
+        client = finnhub.Client(api_key=settings.finnhub_api_key)
+        res = client.symbol_lookup(query)
+        items = (res or {}).get("result") or []
+        if not items:
+            return None
+        def score(it):
+            desc = (it.get("description") or "").upper()
+            ty = (it.get("type") or "").upper()
+            sym = (it.get("symbol") or "")
+            pref = 1.0 if ty in {"EQS","COMMON STOCK"} else 0.0
+            pref += 0.2 if "NYSE" in desc or "NASDAQ" in desc else 0.0
+            return (pref, -len(sym))
+        items.sort(key=score, reverse=True)
+        return items[0].get("symbol")
+    except Exception:
+        return None
+
+def _maybe_build_crypto_symbol(token: str) -> Optional[str]:
+    t = (token or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,10}", t):
+        return None
+    if t in _STOP:
+        return None
+    if t in {"USD","USDT","USDC"}:
+        return None
+    return f"{t}-USD"
+
+def _resolve_company_names_to_tickers_dynamic(text: str, is_crypto: bool) -> List[str]:
+    words = _tokenize_words(text)
+    candidates: List[str] = []
+
+    if is_crypto:
+        for w in words:
+            s = _maybe_build_crypto_symbol(w)
+            if s:
+                candidates.append(s)
+                break
+        if candidates:
+            return candidates
+
+    q = " ".join([w for w in words if w.upper() not in _STOP]).strip()
+    if q:
+        sym = _finnhub_symbol_lookup(q)
+        if sym:
+            return [sym]
+        sym2 = _alpha_vantage_symbol_search(q)
+        if sym2:
+            return [sym2]
+
+    if is_crypto:
+        for w in words:
+            s = _maybe_build_crypto_symbol(w)
+            if s:
+                return [s]
+
+    return []
+
+def _extract_tickers(text: str) -> List[str]:
+    tickers = _extract_tickers_regex_only(text)
+    if not tickers:
+        is_crypto = _detect_crypto_intent(text)
+        tickers = _resolve_company_names_to_tickers_dynamic(text, is_crypto)
+    seen, out = set(), []
+    for t in tickers:
+        if t and t not in _STOP and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+# -----------------------------
+# Server & tool selection
+# -----------------------------
 def _select_best_server(query: str, available_servers: Dict[str, MCPServer]) -> Optional[str]:
     is_crypto = _detect_crypto_intent(query)
     if is_crypto:
@@ -83,17 +203,11 @@ def _select_best_server(query: str, available_servers: Dict[str, MCPServer]) -> 
         return "financial-datasets"
     return next(iter(available_servers.keys())) if available_servers else None
 
-
-# -----------------------------
-# Dynamic tool discovery
-# -----------------------------
 def _safe_json_loads(txt: str):
     try:
         return json.loads(txt)
     except Exception:
         return None
-    
-VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 def _normalize_tool_name(raw: Any) -> Optional[str]:
     if isinstance(raw, str):
@@ -128,19 +242,16 @@ def _list_server_tools(manager: MCPManager, server: str) -> Dict[str, dict]:
         if not VALID_TOOL_NAME.match(name):
             continue
         if name.lower() in {"meta", "health", "status"}:
-            # ignore meta tools
             continue
         tool_obj = t if isinstance(t, dict) else {"name": name}
         tools[name] = tool_obj
 
-   # if no tools match known set, return empty dict
     known = set(KNOWN_TOOLSETS.get(server, []))
     if tools and known:
         inter = {k: v for k, v in tools.items() if k in known}
         if inter:
             return inter
 
-    # if no tools match known set, return all discovered tools
     if not tools and known:
         return {k: {"name": k, "inputSchema": {"properties": {}}} for k in known}
 
@@ -148,7 +259,7 @@ def _list_server_tools(manager: MCPManager, server: str) -> Dict[str, dict]:
 
 def _choose_tool_from_available(server: str, query: str, data_type: str, tool_names: List[str]) -> Optional[str]:
     q = (query or "").lower()
-    names = [n for n in tool_names if n.lower() not in {"meta", "health", "status"}]  # חדש
+    names = [n for n in tool_names if n.lower() not in {"meta", "health", "status"}]
     if not names:
         return None
 
@@ -181,7 +292,6 @@ def _choose_tool_from_available(server: str, query: str, data_type: str, tool_na
 
     return names[0]
 
-
 # -----------------------------
 # Options helpers
 # -----------------------------
@@ -191,11 +301,7 @@ def _parse_yyyy_mm_dd(d: str) -> Optional[date]:
     except Exception:
         return None
 
-
 def _pick_best_expiry(dates: List[str]) -> Optional[str]:
-    """
-    Pick the soonest future expiry, otherwise the latest available historical expiry.
-    """
     today = date.today()
     parsed = [(_parse_yyyy_mm_dd(s), s) for s in dates if isinstance(s, str)]
     parsed = [(dt, raw) for dt, raw in parsed if dt is not None]
@@ -204,20 +310,13 @@ def _pick_best_expiry(dates: List[str]) -> Optional[str]:
     futures = sorted([(dt, raw) for dt, raw in parsed if dt >= today], key=lambda x: x[0])
     if futures:
         return futures[0][1]
-    # fallback to latest historical
     past = sorted(parsed, key=lambda x: x[0])
     return past[-1][1] if past else None
-
 
 # -----------------------------
 # Args builder guided by schema
 # -----------------------------
 def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query: str, tickers: List[str]) -> Dict[str, Any]:
-    """
-    Construct args guided by the tool's inputSchema if provided.
-    Adds gentle defaults only for fields that exist in the schema.
-    Handles dynamic expiration_date for get_option_chain.
-    """
     schema = tool.get("inputSchema") or {}
     props = schema.get("properties") if isinstance(schema, dict) else {}
     req = schema.get("required") if isinstance(schema, dict) else []
@@ -229,20 +328,17 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
 
     args: Dict[str, Any] = {}
 
-    # ticker or symbol
     if isinstance(props, dict):
         if "ticker" in props:
             args["ticker"] = primary
         elif "symbol" in props:
             args["symbol"] = primary
 
-        # history defaults
         if "period" in props:
             args.setdefault("period", "1y")
         if "interval" in props:
             args.setdefault("interval", "1d")
 
-        # financial-datasets style historical
         y = datetime.now().year
         if "start_date" in props:
             args.setdefault("start_date", f"{y-1}-01-01")
@@ -252,13 +348,10 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
             args.setdefault("interval", "day")
             args.setdefault("interval_multiplier", 1)
 
-        # yfinance financial statements
         if tool.get("name") == "get_financial_statement" and "financial_type" in props:
             args.setdefault("financial_type", "income_stmt")
 
-        # options chain defaults with dynamic expiration_date
         if tool.get("name") == "get_option_chain":
-            # infer option type from query if present
             if "option_type" in props:
                 qt = (query or "").lower()
                 if "puts" in qt or "put" in qt:
@@ -266,36 +359,28 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
                 else:
                     args.setdefault("option_type", "calls")
 
-            # pick expiration date dynamically
             if "expiration_date" in props:
-                # ensure we have a ticker arg to query expiration dates
                 ticker_arg = args.get("ticker") or args.get("symbol") or primary
                 try:
                     raw = manager.call_sync(server, "get_option_expiration_dates", {"ticker": ticker_arg})
                     data = _safe_json_loads(raw)
-                    
                     if isinstance(data, list):
                         best = _pick_best_expiry(data)
                     else:
-                    
                         lines = raw.splitlines() if isinstance(raw, str) else []
-                        # חפש שורות שנראות כמו YYYY-MM-DD
                         candidates = [ln.strip() for ln in lines if _parse_yyyy_mm_dd(ln.strip())]
                         best = _pick_best_expiry(candidates)
                     if best:
                         args.setdefault("expiration_date", best)
                 except Exception:
-                    # if we fail to get expiration dates, just skip it
                     pass
 
-    # enforce required basics
     if isinstance(req, list):
         for r in req:
             if r not in args and r in ("ticker", "symbol"):
                 args[r] = primary
 
     return args
-
 
 # -----------------------------
 # Public API
@@ -316,20 +401,17 @@ def route_and_call(query: str) -> str:
 
         manager = MCPManager()
 
-        # discover tools from server
         tools_map = _list_server_tools(manager, server)
         tool_names = list(tools_map.keys())
         if not tool_names:
             return f"No tools exposed by server '{server}'"
 
-        # choose an existing tool that fits the query
         tool_name = _choose_tool_from_available(server, query, data_type, tool_names)
         if not tool_name:
             return f"No matching tool found on server '{server}'"
 
         tool_obj = tools_map.get(tool_name, {"name": tool_name})
 
-        # build args from schema (dynamic expiry handling included)
         args = _build_args_from_schema(manager, server, tool_obj, query, tickers)
 
         routing_info = f"Route: {server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | Tickers: {tickers}"
@@ -338,8 +420,6 @@ def route_and_call(query: str) -> str:
 
     except Exception as e:
         return f"MCP routing failed: {str(e)}"
-        
-
 
 @tool(
     name="mcp_auto",
