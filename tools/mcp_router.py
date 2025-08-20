@@ -221,9 +221,15 @@ def _normalize_tool_name(raw: Any) -> Optional[str]:
     return s or None
 
 def _list_server_tools(manager: MCPManager, server: str) -> Dict[str, dict]:
-    data = manager.list_tools_sync(server)
-    tools: Dict[str, dict] = {}
+    # נסה קודם sync wrapper אם קיים
+    if hasattr(manager, "list_tools_sync") and callable(getattr(manager, "list_tools_sync")):
+        data = manager.list_tools_sync(server)
+    else:
+        # ייתכן שהוחזר coroutine – נריץ אותו כמו שצריך
+        res = manager.list_tools(server)
+        data = asyncio.run(res) if asyncio.iscoroutine(res) else res
 
+    tools: Dict[str, dict] = {}
     raw_tools = []
     if isinstance(data, dict) and isinstance(data.get("tools"), list):
         raw_tools = data["tools"]
@@ -311,6 +317,14 @@ def _pick_best_expiry(dates: List[str]) -> Optional[str]:
     past = sorted(parsed, key=lambda x: x[0])
     return past[-1][1] if past else None
 
+def _call_tool_blocking(manager: MCPManager, server: str, tool_name: str, args: dict) -> str:
+    if hasattr(manager, "call_sync") and callable(getattr(manager, "call_sync")):
+        return manager.call_sync(server, tool_name, args)
+    res = manager.call(server, tool_name, args)
+    return asyncio.run(res) if asyncio.iscoroutine(res) else res
+
+
+
 # -----------------------------
 # Args builder (guided by schema)
 # -----------------------------
@@ -365,7 +379,7 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
                 ticker_arg = args.get("ticker") or args.get("symbol")
                 if ticker_arg:
                     try:
-                        raw = manager.call_sync(server, "get_option_expiration_dates", {"ticker": ticker_arg})
+                        raw = _call_tool_blocking(manager, server, "get_option_expiration_dates", {"ticker": ticker_arg})
                         data = _safe_json_loads(raw)
                         if isinstance(data, list):
                             best = _pick_best_expiry(data)
@@ -423,7 +437,7 @@ def route_and_call(query: str) -> str:
             return "Could not resolve a ticker from the query. Please specify a symbol (e.g., MSFT)."
 
         routing_info = f"Route: {server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | Tickers: {tickers}"
-        result = manager.call_sync(server, tool_name, args)
+        result = _call_tool_blocking(manager, server, tool_name, args)
         return f"{routing_info}\n\n{result}"
 
     except Exception as e:
