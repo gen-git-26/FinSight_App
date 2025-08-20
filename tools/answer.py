@@ -21,6 +21,9 @@ from tools.tools import (
 from tools.mcp_router import route_and_call
 from memory.manager import fetch_memory, persist_turn
 from mcp_connection.manager import MCPServer
+from tools.mcp_router import mcp_auto
+
+
 
 # Regex to match common stock ticker patterns
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]|-[A-Z]{1,3})?\b")
@@ -78,22 +81,22 @@ def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     mcp_success = False
     
     # 2) Try MCP first if conditions are met
+    mcp_payload = None  # will hold fused output when available
     if should_use_mcp and available_mcp_servers:
         try:
             print(f"Attempting MCP data fetch for: {query}")
-            mcp_result = route_and_call(query)
+            # Use the fused tool, not the raw router
+            mcp_payload = mcp_auto(query=query)  # returns {'answer', 'snippets', 'meta': {...}}
             mcp_data_attempted = True
-            
-            # Check if MCP call was successful (not an error message)
-            if not mcp_result.startswith("MCP call:"):
+            if isinstance(mcp_payload, dict) and mcp_payload.get("answer"):
                 mcp_success = True
-                print("MCP data fetch successful")
+                print("MCP data fetch (fused) successful")
             else:
-                print(f"MCP returned error: {mcp_result}")
-                
+                print("MCP fused call returned no answer; will fall back")
         except Exception as e:
-            print(f"MCP call failed: {e}")
+            print(f"MCP fused call failed: {e}")
             mcp_data_attempted = True
+    
     
     # 3) Refresh cache with static tools if needed (especially if MCP failed or not used)
     if not mcp_success and tickers:
@@ -148,28 +151,32 @@ def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     else:
         max_tok = 650 if mcp_success else 512   # More tokens for live data responses
 
-    # 8) Summarize with enhanced prompt
-    answer_text, snippets = asyncio.run(rerank_and_summarize(
-        query, 
-        docs, 
-        style=style, 
-        extra_context=extra_context, 
-        max_tokens=max_tok
-    ))
+    # 8) Summarize with enhanced prompt (or reuse MCP fused answer)
+    if mcp_success and isinstance(mcp_payload, dict) and mcp_payload.get("answer"):
+        answer_text = mcp_payload["answer"]
+        snippets = mcp_payload.get("snippets", [])
+    else:
+        answer_text, snippets = asyncio.run(rerank_and_summarize(
+            query,
+            docs,
+            style=style,
+            extra_context=extra_context,
+            max_tokens=max_tok
+        ))
 
     # 9) Persist this turn in long-term memory
     asyncio.run(persist_turn(user_text=query, assistant_text=answer_text))
 
     # 10) Enhanced metadata
     metadata = {
-        "style": style, 
-        "tickers": tickers,
-        "mcp_attempted": mcp_data_attempted,
-        "mcp_success": mcp_success,
-        "available_servers": list(available_mcp_servers.keys()),
-        "docs_retrieved": len(docs),
-        "should_use_mcp": should_use_mcp
-    }
+    "style": style,
+    "tickers": tickers,
+    "mcp_attempted": mcp_data_attempted,
+    "mcp_success": mcp_success,
+    "available_servers": list(available_mcp_servers.keys()),
+    "docs_retrieved": len(docs) if not mcp_success else len(snippets),
+    "should_use_mcp": should_use_mcp
+}
 
     return {
         "answer": answer_text, 

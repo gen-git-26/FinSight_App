@@ -78,9 +78,9 @@ QUERY ROUTING RULES:
             
             "RESPONSE EXCELLENCE STANDARDS: "
             "• Provide data source transparency - show which tools were used and why"
-            "• Include precise timestamps for all market data (format: [Tool • YYYY-MM-DD HH:MM UTC])"
+            "• Ensure responses are concise, relevant, and actionable"
+            "• Use clear, professional language suitable for financial professionals"
             "• Structure responses with clear sections for complex analysis"
-            "• Use actionable bullet points with inline citations"
             "• Show reasoning for tool selection when relevant"
 
             "ACCURACY & HONESTY PROTOCOL: "
