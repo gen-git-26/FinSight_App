@@ -1,208 +1,295 @@
-# tools/mcp_router.py 
+# tools/mcp_router.py
 from __future__ import annotations
+
 import json
 import re
-from typing import Dict, List, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, date
+from typing import Dict, List, Optional, Any
 
 from agno.tools import tool
 from rag.fusion import fuse
 from mcp_connection.manager import MCPManager, MCPServer
 
-
-
-# Enhanced ticker detection
+# -----------------------------
+# Heuristics
+# -----------------------------
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z]{1,3})?\b")
 _CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "ADA", "DOT", "MATIC", "AVAX", "LINK", "UNI", "AAVE"}
 _STOP = {"USD", "PE", "EV", "EPS", "ETF", "AND", "OR", "THE", "A", "AN", "IS", "ARE", "FOR", "TO", "OF", "IN"}
 
+
 def _extract_tickers(text: str) -> List[str]:
-    """Extract potential ticker symbols from text."""
-    matches = _TICKER_RE.findall(text.upper())
+    matches = _TICKER_RE.findall((text or "").upper())
     return [m for m in matches if m not in _STOP]
 
+
 def _detect_crypto_intent(query: str) -> bool:
-    """Detect if query is about cryptocurrency."""
-    q_upper = query.upper()
+    q_upper = (query or "").upper()
     crypto_keywords = ["CRYPTO", "BITCOIN", "BTC", "ETH", "ETHEREUM", "COIN", "TOKEN", "BLOCKCHAIN", "DEFI"]
-    
-    # Check for crypto keywords
-    if any(keyword in q_upper for keyword in crypto_keywords):
+    if any(k in q_upper for k in crypto_keywords):
         return True
-    
-    # Check for known crypto symbols
     tickers = _extract_tickers(query)
-    if any(ticker in _CRYPTO_SYMBOLS for ticker in tickers):
-        return True
-        
-    return False
+    return any(t in _CRYPTO_SYMBOLS for t in tickers)
+
 
 def _detect_data_type(query: str) -> str:
-    """Detect what type of data is being requested."""
-    q_lower = query.lower()
-    
-    # Real-time/current data
-    if any(keyword in q_lower for keyword in ["current", "now", "latest", "today", "real-time", "live", "quote"]):
+    q_lower = (query or "").lower()
+    if any(k in q_lower for k in ["current", "now", "latest", "today", "real-time", "live", "quote", "price now"]):
         return "realtime"
-    
-    # Historical data
-    if any(keyword in q_lower for keyword in ["historical", "history", "past", "chart", "trend", "over time", "since"]):
+    if any(k in q_lower for k in ["historical", "history", "past", "chart", "trend", "over time", "since"]):
         return "historical"
-    
-    # News/fundamental
-    if any(keyword in q_lower for keyword in ["news", "earnings", "report", "announcement", "fundamentals"]):
+    if any(k in q_lower for k in ["news", "earnings", "report", "announcement", "fundamentals"]):
         return "fundamental"
-    
-    # Default to realtime for price queries
-    if any(keyword in q_lower for keyword in ["price", "value", "cost", "trading"]):
+    if any(k in q_lower for k in ["price", "value", "cost", "trading"]):
         return "realtime"
-        
     return "general"
 
+
 def _select_best_server(query: str, available_servers: Dict[str, MCPServer]) -> Optional[str]:
-    """Intelligently select the best MCP server for the query."""
     is_crypto = _detect_crypto_intent(query)
-    data_type = _detect_data_type(query)
-    
-    # Priority logic
     if is_crypto:
-        # For crypto, prefer financial-datasets if available
         if "financial-datasets" in available_servers:
             return "financial-datasets"
         if "coinmarketcap" in available_servers:
             return "coinmarketcap"
-    
-    # For stocks, prefer yfinance for comprehensive data
     if "yfinance" in available_servers and not is_crypto:
         return "yfinance"
-    
-    # Fallback to any available server
     if "financial-datasets" in available_servers:
         return "financial-datasets"
-    
-    # Return first available server
     return next(iter(available_servers.keys())) if available_servers else None
 
-def _choose_optimal_tool(server: str, query: str, data_type: str) -> str:
-    """Choose the optimal tool based on server and query analysis."""
-    q_lower = query.lower()
-    is_crypto = _detect_crypto_intent(query)
-    
-    if server == "financial-datasets":
-        if data_type == "realtime":
-            return "get_current_crypto_price" if is_crypto else "get_current_stock_price"
-        elif data_type == "historical":
-            return "get_historical_crypto_prices" if is_crypto else "get_historical_stock_prices"
-        else:
-            return "get_current_crypto_price" if is_crypto else "get_current_stock_price"
-    
-    elif server == "yfinance":
-        if "info" in q_lower or "company" in q_lower or data_type == "fundamental":
+
+# -----------------------------
+# Dynamic tool discovery
+# -----------------------------
+def _safe_json_loads(txt: str):
+    try:
+        return json.loads(txt)
+    except Exception:
+        return None
+
+
+def _list_server_tools(manager: MCPManager, server: str) -> Dict[str, dict]:
+    """
+    Returns mapping name -> tool object as provided by the server.
+    Tries JSON first. Falls back to parsing simple text list lines starting with '- '.
+    """
+    raw = manager.call_sync(server, "list_tools", {})
+    data = _safe_json_loads(raw)
+    tools: Dict[str, dict] = {}
+
+    # Standard JSON: {"tools":[{name, description, inputSchema:{properties, required}}, ...]}
+    if isinstance(data, dict) and isinstance(data.get("tools"), list):
+        for t in data["tools"]:
+            name = (t.get("name") or "").strip()
+            if name:
+                tools[name] = t
+        return tools
+
+    # Fallback: parse textual "Available tools" style
+    if isinstance(raw, str):
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.startswith("- "):
+                name = line[2:].split(":")[0].strip()
+                if name:
+                    tools[name] = {"name": name, "description": line}
+    return tools
+
+
+def _choose_tool_from_available(server: str, query: str, data_type: str, tool_names: List[str]) -> Optional[str]:
+    q = (query or "").lower()
+
+    if server == "yfinance":
+        if data_type == "historical" and "get_historical_stock_prices" in tool_names:
+            return "get_historical_stock_prices"
+        if "news" in q and "get_yahoo_finance_news" in tool_names:
+            return "get_yahoo_finance_news"
+        if any(w in q for w in ["dividend", "dividends", "split", "splits"]) and "get_stock_actions" in tool_names:
+            return "get_stock_actions"
+        if any(w in q for w in ["financial statement", "balance sheet", "income statement", "cashflow", "cash flow"]) and "get_financial_statement" in tool_names:
+            return "get_financial_statement"
+        if "get_stock_info" in tool_names:
             return "get_stock_info"
-        elif data_type == "historical":
-            return "get_historical_data"
-        else:
-            return "get_current_price"
-    
-    elif server == "coinmarketcap":
-        return "quote"
-    
-    # Default fallback
-    return "get_stock_info" if server == "yfinance" else "get_current_stock_price"
 
-def _build_smart_args(server: str, tool: str, query: str, tickers: List[str]) -> Dict:
-    """Build smart arguments based on server, tool, and detected context."""
-    is_crypto = _detect_crypto_intent(query)
-    data_type = _detect_data_type(query)
-    
-    # Default ticker selection
-    if tickers:
-        primary_ticker = tickers[0]
-    else:
-        primary_ticker = "BTC" if is_crypto else "AAPL"
-    
     if server == "financial-datasets":
-        if is_crypto:
-            # Ensure crypto tickers have proper format (e.g., BTC-USD)
-            if "-" not in primary_ticker and primary_ticker in _CRYPTO_SYMBOLS:
-                primary_ticker = f"{primary_ticker}-USD"
-        
-        args = {"ticker": primary_ticker}
-        
-        # Add historical parameters if needed
-        if "historical" in tool:
-            current_year = datetime.now().year
-            args.update({
-                "start_date": f"{current_year-1}-01-01",
-                "end_date": f"{current_year}-12-31",
-                "interval": "day",
-                "interval_multiplier": 1
-            })
-        
-        return args
-    
-    elif server == "yfinance":
-        args = {"symbol" if "symbol" in query.lower() else "ticker": primary_ticker}
-        
-        # Add period for historical data
+        is_crypto = _detect_crypto_intent(query)
         if data_type == "historical":
-            args["period"] = "1y"  # Default to 1 year
-            
-        return args
-    
-    elif server == "coinmarketcap":
-        return {"symbol": primary_ticker, "convert": "USD"}
-    
-    return {"ticker": primary_ticker}
+            pref = "get_historical_crypto_prices" if is_crypto else "get_historical_stock_prices"
+            if pref in tool_names:
+                return pref
+        pref = "get_current_crypto_price" if is_crypto else "get_current_stock_price"
+        if pref in tool_names:
+            return pref
 
+    if "quote" in tool_names:
+        return "quote"
+
+    return tool_names[0] if tool_names else None
+
+
+# -----------------------------
+# Options helpers
+# -----------------------------
+def _parse_yyyy_mm_dd(d: str) -> Optional[date]:
+    try:
+        return datetime.strptime(d, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _pick_best_expiry(dates: List[str]) -> Optional[str]:
+    """
+    Pick the soonest future expiry, otherwise the latest available historical expiry.
+    """
+    today = date.today()
+    parsed = [(_parse_yyyy_mm_dd(s), s) for s in dates if isinstance(s, str)]
+    parsed = [(dt, raw) for dt, raw in parsed if dt is not None]
+    if not parsed:
+        return None
+    futures = sorted([(dt, raw) for dt, raw in parsed if dt >= today], key=lambda x: x[0])
+    if futures:
+        return futures[0][1]
+    # fallback to latest historical
+    past = sorted(parsed, key=lambda x: x[0])
+    return past[-1][1] if past else None
+
+
+# -----------------------------
+# Args builder guided by schema
+# -----------------------------
+def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query: str, tickers: List[str]) -> Dict[str, Any]:
+    """
+    Construct args guided by the tool's inputSchema if provided.
+    Adds gentle defaults only for fields that exist in the schema.
+    Handles dynamic expiration_date for get_option_chain.
+    """
+    schema = tool.get("inputSchema") or {}
+    props = schema.get("properties") if isinstance(schema, dict) else {}
+    req = schema.get("required") if isinstance(schema, dict) else []
+
+    is_crypto = _detect_crypto_intent(query)
+    primary = tickers[0] if tickers else ("BTC" if is_crypto else "AAPL")
+    if is_crypto and "-" not in primary and primary in _CRYPTO_SYMBOLS:
+        primary = f"{primary}-USD"
+
+    args: Dict[str, Any] = {}
+
+    # ticker or symbol
+    if isinstance(props, dict):
+        if "ticker" in props:
+            args["ticker"] = primary
+        elif "symbol" in props:
+            args["symbol"] = primary
+
+        # history defaults
+        if "period" in props:
+            args.setdefault("period", "1y")
+        if "interval" in props:
+            args.setdefault("interval", "1d")
+
+        # financial-datasets style historical
+        y = datetime.now().year
+        if "start_date" in props:
+            args.setdefault("start_date", f"{y-1}-01-01")
+        if "end_date" in props:
+            args.setdefault("end_date", f"{y}-12-31")
+        if "interval" in props and "interval_multiplier" in props:
+            args.setdefault("interval", "day")
+            args.setdefault("interval_multiplier", 1)
+
+        # yfinance financial statements
+        if tool.get("name") == "get_financial_statement" and "financial_type" in props:
+            args.setdefault("financial_type", "income_stmt")
+
+        # options chain defaults with dynamic expiration_date
+        if tool.get("name") == "get_option_chain":
+            # infer option type from query if present
+            if "option_type" in props:
+                qt = (query or "").lower()
+                if "puts" in qt or "put" in qt:
+                    args.setdefault("option_type", "puts")
+                else:
+                    args.setdefault("option_type", "calls")
+
+            # pick expiration date dynamically
+            if "expiration_date" in props:
+                # ensure we have a ticker arg to query expiration dates
+                ticker_arg = args.get("ticker") or args.get("symbol") or primary
+                try:
+                    raw = manager.call_sync(server, "get_option_expiration_dates", {"ticker": ticker_arg})
+                    data = _safe_json_loads(raw)
+                    # yfinance מחזיר לרוב רשימה של מחרוזות תאריכים
+                    if isinstance(data, list):
+                        best = _pick_best_expiry(data)
+                    else:
+                        # fallback אם חזר טקסט
+                        lines = raw.splitlines() if isinstance(raw, str) else []
+                        # חפש שורות שנראות כמו YYYY-MM-DD
+                        candidates = [ln.strip() for ln in lines if _parse_yyyy_mm_dd(ln.strip())]
+                        best = _pick_best_expiry(candidates)
+                    if best:
+                        args.setdefault("expiration_date", best)
+                except Exception:
+                    # אם נכשל, לא נכניס תאריך כדי לתת לשרת לטפל בשגיאה
+                    pass
+
+    # enforce required basics
+    if isinstance(req, list):
+        for r in req:
+            if r not in args and r in ("ticker", "symbol"):
+                args[r] = primary
+
+    return args
+
+
+# -----------------------------
+# Public API
+# -----------------------------
 def route_and_call(query: str) -> str:
-    """
-    Intelligent routing function that analyzes query and calls optimal MCP server/tool.
-    This is the core routing logic used by mcp_auto.
-    """
     try:
         available_servers = MCPServer.from_env()
         if not available_servers:
             return "No MCP servers configured. Please check MCP_SERVERS in .env"
-        
-        # Extract context
+
         tickers = _extract_tickers(query)
         data_type = _detect_data_type(query)
         is_crypto = _detect_crypto_intent(query)
-        
-        # Select optimal server
+
         server = _select_best_server(query, available_servers)
         if not server:
             return "No suitable MCP server found"
-        
-        # Choose optimal tool
-        tool_name = _choose_optimal_tool(server, query, data_type)
-        
-        # Build smart arguments
-        args = _build_smart_args(server, tool_name, query, tickers)
-        
-        # Add routing metadata to response
-        routing_info = f"Route: {server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | Tickers: {tickers}"
-        
-        # Execute the call using MCPManager directly
+
         manager = MCPManager()
+
+        # discover tools from server
+        tools_map = _list_server_tools(manager, server)
+        tool_names = list(tools_map.keys())
+        if not tool_names:
+            return f"No tools exposed by server '{server}'"
+
+        # choose an existing tool that fits the query
+        tool_name = _choose_tool_from_available(server, query, data_type, tool_names)
+        if not tool_name:
+            return f"No matching tool found on server '{server}'"
+
+        tool_obj = tools_map.get(tool_name, {"name": tool_name})
+
+        # build args from schema (dynamic expiry handling included)
+        args = _build_args_from_schema(manager, server, tool_obj, query, tickers)
+
+        routing_info = f"Route: {server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | Tickers: {tickers}"
         result = manager.call_sync(server, tool_name, args)
-        
-        
-        # Return with routing transparency
         return f"{routing_info}\n\n{result}"
-        
+
     except Exception as e:
         return f"MCP routing failed: {str(e)}"
 
+
 @tool(
     name="mcp_auto",
-    description="Intelligent auto-router for MCP servers. Analyzes query and automatically selects the best server/tool combination. Handles stocks, crypto, real-time data, historical data, and news. Input: natural language query."
+    description="Auto-router for MCP servers. Dynamically lists tools from the chosen server, picks the best match, and builds valid arguments from the tool schema."
 )
 @fuse(tool_name="mcp-auto", doc_type="mcp")
 def mcp_auto(query: str) -> str:
-    """
-    Enhanced auto-routing tool with intelligent server/tool selection.
-    Automatically detects query intent and routes to optimal MCP server.
-    """
     return route_and_call(query)

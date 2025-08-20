@@ -15,6 +15,7 @@ from tools.tools import (
     finnhub_basic_financials,
     finnhub_financials_as_reported,
     company_overview,
+    finnhub_financials_new
 )
 from tools.answer import answer
 from utils.logging import setup_logging
@@ -107,6 +108,7 @@ QUERY ROUTING RULES:
             finnhub_basic_financials,
             finnhub_financials_as_reported,
             company_overview,
+            finnhub_financials_new
         ],
         markdown=True,
     )
