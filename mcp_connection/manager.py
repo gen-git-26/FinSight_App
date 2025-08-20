@@ -53,15 +53,14 @@ class MCPServer:
                 continue
 
             cmd_raw = it.get("command") or ""
-            args: Optional[List[str]] = it.get("args")  # may be None
+            args: Optional[List[str]] = it.get("args")
             cwd = it.get("cwd") or None
             env = dict(it.get("env") or {})
 
-            # Default: make sure output is unbuffered unless explicitly set
+            # Ensure unbuffered python output unless explicitly set
             env.setdefault("PYTHONUNBUFFERED", "1")
 
-            # Normalize command/args:
-            # If args is missing and command is a string with spaces -> split
+            # Normalize command and args
             if isinstance(cmd_raw, str):
                 if (args is None or not isinstance(args, list)) and cmd_raw.strip():
                     parts = shlex.split(cmd_raw)
@@ -72,7 +71,6 @@ class MCPServer:
                     if args is None:
                         args = []
             else:
-                # Shouldn't happen in our config, but keep safe fallback
                 command = str(cmd_raw)
                 if args is None:
                     args = []
@@ -95,7 +93,6 @@ class MCPManager:
     def __init__(self, servers: Optional[Dict[str, MCPServer]] = None) -> None:
         self.servers = servers or MCPServer.from_env()
 
-    # keep this because some code referenced MCPManager.from_env()
     @classmethod
     def from_env(cls) -> Dict[str, MCPServer]:
         return MCPServer.from_env()
@@ -108,7 +105,6 @@ class MCPManager:
 
         srv = self.servers[server_name]
 
-        # Build Stdio params with proper fields
         params = StdioServerParameters(
             command=srv.command,
             args=srv.args or [],
@@ -116,7 +112,7 @@ class MCPManager:
             cwd=srv.cwd,
         )
 
-        # Debug spawn line 
+        # Debug spawn line
         print(
             "[MCP spawn]",
             params.command,
@@ -131,7 +127,7 @@ class MCPManager:
                 await session.initialize()
                 result = await session.call_tool(tool, arguments)
 
-                # Flatten result to text/json
+                # Flatten result to text or JSON
                 parts: List[str] = []
                 content = getattr(result, "content", None) or []
                 for c in content:
@@ -146,8 +142,65 @@ class MCPManager:
                     parts.append(str(c))
                 return "\n".join(parts) if parts else (json.dumps(result, ensure_ascii=False) if result else "")
 
-    # sync helpers for tool wrappers
     @staticmethod
     def call_sync(server_name: str, tool: str, arguments: Dict[str, Any]) -> str:
         mgr = MCPManager()
         return asyncio.run(mgr.call(server_name, tool, arguments))
+
+    # ---------- Official ListTools over the MCP protocol ----------
+    async def list_tools(self, server_name: str) -> Dict[str, Any]:
+        if server_name not in self.servers:
+            raise ValueError(
+                f"Unknown MCP server '{server_name}'. Known: {', '.join(self.servers) or 'none'}"
+            )
+
+        srv = self.servers[server_name]
+        params = StdioServerParameters(
+            command=srv.command,
+            args=srv.args or [],
+            env=srv.env or {},
+            cwd=srv.cwd,
+        )
+
+        # Debug spawn line for list tools
+        print(
+            "[MCP spawn list_tools]",
+            params.command,
+            params.args,
+            params.cwd,
+            {k: v for k, v in (params.env or {}).items()
+             if k in ("PYTHONUNBUFFERED", "FINANCIAL_DATASETS_API_KEY")}
+        )
+
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                init = await session.initialize()
+
+                try:
+                    listed = await session.list_tools()
+                except Exception:
+                    listed = init
+
+                # normalize: 
+                if hasattr(listed, "tools"):
+                    items = getattr(listed, "tools") or []
+                elif isinstance(listed, dict) and "tools" in listed:
+                    items = listed.get("tools") or []
+                else:
+                    # fallback: 
+                    items = listed if isinstance(listed, list) else []
+
+                tools_list: List[Dict[str, Any]] = []
+                for t in items:
+                    if hasattr(t, "model_dump"):
+                        tools_list.append(t.model_dump())
+                    elif isinstance(t, dict):
+                        tools_list.append(t)
+                    else:
+                        
+                        continue
+
+                return {"tools": tools_list}
+
+    def list_tools_sync(self, server_name: str) -> Dict[str, Any]:
+        return asyncio.run(self.list_tools(server_name))

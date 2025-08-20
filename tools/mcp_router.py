@@ -15,7 +15,32 @@ from mcp_connection.manager import MCPManager, MCPServer
 # -----------------------------
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z]{1,3})?\b")
 _CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "ADA", "DOT", "MATIC", "AVAX", "LINK", "UNI", "AAVE"}
-_STOP = {"USD", "PE", "EV", "EPS", "ETF", "AND", "OR", "THE", "A", "AN", "IS", "ARE", "FOR", "TO", "OF", "IN"}
+_STOP = {
+    "USD","PE","EV","EPS","ETF","AND","OR","THE","A","AN","IS","ARE","FOR","TO","OF","IN",
+    "PRICE","NEWS","OPTIONS","CHAIN","PUTS","CALLS"  # חדש
+}
+VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
+KNOWN_TOOLSETS: Dict[str, List[str]] = {
+    "yfinance": [
+        "get_stock_info",
+        "get_historical_stock_prices",
+        "get_yahoo_finance_news",
+        "get_stock_actions",
+        "get_financial_statement",
+        "get_holder_info",
+        "get_option_expiration_dates",
+        "get_option_chain",
+        "get_recommendations",
+    ],
+    "financial-datasets": [
+        "get_current_stock_price",
+        "get_historical_stock_prices",
+        "get_current_crypto_price",
+        "get_historical_crypto_prices",
+    ],
+    "coinmarketcap": ["quote"],
+}
+
 
 
 def _extract_tickers(text: str) -> List[str]:
@@ -67,65 +92,94 @@ def _safe_json_loads(txt: str):
         return json.loads(txt)
     except Exception:
         return None
+    
+VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
 
+def _normalize_tool_name(raw: Any) -> Optional[str]:
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.startswith("(") and "," in s and "'" in s:
+            m = re.search(r"'([^']+)'", s)
+            if m:
+                s = m.group(1)
+        return s or None
+    if isinstance(raw, (list, tuple)) and raw:
+        return _normalize_tool_name(raw[0])
+    s = str(raw).strip()
+    if s.startswith("(") and "," in s and "'" in s:
+        m = re.search(r"'([^']+)'", s)
+        if m:
+            s = m.group(1)
+    return s or None
 
 def _list_server_tools(manager: MCPManager, server: str) -> Dict[str, dict]:
-    """
-    Returns mapping name -> tool object as provided by the server.
-    Tries JSON first. Falls back to parsing simple text list lines starting with '- '.
-    """
-    raw = manager.call_sync(server, "list_tools", {})
-    data = _safe_json_loads(raw)
+    data = manager.list_tools_sync(server)
     tools: Dict[str, dict] = {}
 
-    # Standard JSON: {"tools":[{name, description, inputSchema:{properties, required}}, ...]}
+    raw_tools = []
     if isinstance(data, dict) and isinstance(data.get("tools"), list):
-        for t in data["tools"]:
-            name = (t.get("name") or "").strip()
-            if name:
-                tools[name] = t
-        return tools
+        raw_tools = data["tools"]
 
-    # Fallback: parse textual "Available tools" style
-    if isinstance(raw, str):
-        for line in raw.splitlines():
-            line = line.strip()
-            if line.startswith("- "):
-                name = line[2:].split(":")[0].strip()
-                if name:
-                    tools[name] = {"name": name, "description": line}
+    for t in raw_tools:
+        name_val = t.get("name") if isinstance(t, dict) else getattr(t, "name", None) or t
+        name = _normalize_tool_name(name_val) or ""
+        if not name:
+            continue
+        if not VALID_TOOL_NAME.match(name):
+            continue
+        if name.lower() in {"meta", "health", "status"}:
+            # ignore meta tools
+            continue
+        tool_obj = t if isinstance(t, dict) else {"name": name}
+        tools[name] = tool_obj
+
+   # if no tools match known set, return empty dict
+    known = set(KNOWN_TOOLSETS.get(server, []))
+    if tools and known:
+        inter = {k: v for k, v in tools.items() if k in known}
+        if inter:
+            return inter
+
+    # if no tools match known set, return all discovered tools
+    if not tools and known:
+        return {k: {"name": k, "inputSchema": {"properties": {}}} for k in known}
+
     return tools
-
 
 def _choose_tool_from_available(server: str, query: str, data_type: str, tool_names: List[str]) -> Optional[str]:
     q = (query or "").lower()
+    names = [n for n in tool_names if n.lower() not in {"meta", "health", "status"}]  # חדש
+    if not names:
+        return None
 
     if server == "yfinance":
-        if data_type == "historical" and "get_historical_stock_prices" in tool_names:
+        if data_type == "historical" and "get_historical_stock_prices" in names:
             return "get_historical_stock_prices"
-        if "news" in q and "get_yahoo_finance_news" in tool_names:
+        if "news" in q and "get_yahoo_finance_news" in names:
             return "get_yahoo_finance_news"
-        if any(w in q for w in ["dividend", "dividends", "split", "splits"]) and "get_stock_actions" in tool_names:
+        if any(w in q for w in ["dividend", "dividends", "split", "splits"]) and "get_stock_actions" in names:
             return "get_stock_actions"
-        if any(w in q for w in ["financial statement", "balance sheet", "income statement", "cashflow", "cash flow"]) and "get_financial_statement" in tool_names:
+        if any(w in q for w in ["financial statement","balance sheet","income statement","cashflow","cash flow"]) and "get_financial_statement" in names:
             return "get_financial_statement"
-        if "get_stock_info" in tool_names:
+        if "option" in q and "get_option_chain" in names:
+            return "get_option_chain"
+        if "get_stock_info" in names:
             return "get_stock_info"
 
     if server == "financial-datasets":
         is_crypto = _detect_crypto_intent(query)
         if data_type == "historical":
             pref = "get_historical_crypto_prices" if is_crypto else "get_historical_stock_prices"
-            if pref in tool_names:
+            if pref in names:
                 return pref
         pref = "get_current_crypto_price" if is_crypto else "get_current_stock_price"
-        if pref in tool_names:
+        if pref in names:
             return pref
 
-    if "quote" in tool_names:
+    if "quote" in names:
         return "quote"
 
-    return tool_names[0] if tool_names else None
+    return names[0]
 
 
 # -----------------------------
@@ -219,11 +273,11 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
                 try:
                     raw = manager.call_sync(server, "get_option_expiration_dates", {"ticker": ticker_arg})
                     data = _safe_json_loads(raw)
-                    # yfinance מחזיר לרוב רשימה של מחרוזות תאריכים
+                    
                     if isinstance(data, list):
                         best = _pick_best_expiry(data)
                     else:
-                        # fallback אם חזר טקסט
+                    
                         lines = raw.splitlines() if isinstance(raw, str) else []
                         # חפש שורות שנראות כמו YYYY-MM-DD
                         candidates = [ln.strip() for ln in lines if _parse_yyyy_mm_dd(ln.strip())]
@@ -231,7 +285,7 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
                     if best:
                         args.setdefault("expiration_date", best)
                 except Exception:
-                    # אם נכשל, לא נכניס תאריך כדי לתת לשרת לטפל בשגיאה
+                    # if we fail to get expiration dates, just skip it
                     pass
 
     # enforce required basics
@@ -284,6 +338,7 @@ def route_and_call(query: str) -> str:
 
     except Exception as e:
         return f"MCP routing failed: {str(e)}"
+        
 
 
 @tool(
