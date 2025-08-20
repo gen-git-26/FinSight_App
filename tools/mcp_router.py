@@ -1,10 +1,8 @@
 # tools/mcp_router.py
 from __future__ import annotations
 
-import os
 import re
 import json
-import requests
 from functools import lru_cache
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any
@@ -14,22 +12,32 @@ from rag.fusion import fuse
 from mcp_connection.manager import MCPManager, MCPServer
 
 # -----------------------------
-# Constants & heuristics
+# Constants & heuristics (English only)
 # -----------------------------
-_TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z]{1,6})?\b")
+
+# Strict ticker regex: e.g., MSFT, NVDA, GOOGL, BRK.B, XRP-USD
+_TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z0-9]{1,6})?\b")
+
+# Words we never treat as tickers
 _STOP = {
-    "USD","PE","EV","EPS","ETF","AND","OR","THE","A","AN","IS","ARE","FOR","TO","OF","IN",
-    "PRICE","NEWS","OPTIONS","CHAIN","PUTS","CALLS",
-    "WHAT","ABOUT","SHOW","ME","RECENT","UPGRADES","DOWNGRADES","PLEASE","GET","GIVE","WITH",
+    "USD", "USDT", "USDC",
+    "PE", "EV", "EPS", "ETF",
+    "AND", "OR", "THE", "A", "AN", "IS", "ARE", "FOR", "TO", "OF", "IN",
+    "PRICE", "NEWS", "OPTIONS", "CHAIN", "PUTS", "CALLS",
+    "WHAT", "ABOUT", "SHOW", "ME", "RECENT", "UPGRADES", "DOWNGRADES",
+    "PLEASE", "GET", "GIVE", "WITH",
 }
-_CRYPTO_SYMBOLS = {
-    "BTC","ETH","SOL","ADA","DOT","MATIC","AVAX","LINK","UNI","AAVE",
-    "XRP","DOGE","LTC","BCH","ATOM","ETC","FIL","XLM","NEAR","APT","ARB",
+
+# Single crypto keyword set (no duplicate symbol lists)
+_CRYPTO_KEYWORDS = {
+    "CRYPTO", "BITCOIN", "BTC", "ETH", "ETHEREUM", "COIN", "TOKEN", "BLOCKCHAIN", "DEFI",
+    "XRP", "DOGE", "LTC", "BCH", "SOL", "ADA", "MATIC", "AVAX", "LINK",
+    "UNI", "AAVE", "ATOM", "ETC", "FIL", "XLM", "NEAR", "APT", "ARB"
 }
 
 VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
 
-# Known toolsets for each MCP server (used to intersect with dynamic discovery)
+# Known toolsets per MCP server (used to intersect with dynamic discovery)
 KNOWN_TOOLSETS: Dict[str, List[str]] = {
     "yfinance": [
         "get_stock_info",
@@ -52,25 +60,24 @@ KNOWN_TOOLSETS: Dict[str, List[str]] = {
 }
 
 # -----------------------------
-# Tokenization & detection
+# Tokenization & intent
 # -----------------------------
+
 def _tokenize_words(text: str) -> List[str]:
     return re.findall(r"[A-Za-z0-9\.\-]+", (text or ""))
 
-def _extract_tickers_regex_only(text: str) -> List[str]:
+def _extract_regex_tickers(text: str) -> List[str]:
     matches = _TICKER_RE.findall((text or "").upper())
     return [m for m in matches if m not in _STOP]
 
 def _detect_crypto_intent(query: str) -> bool:
     q_upper = (query or "").upper()
-    crypto_keywords = [
-        "CRYPTO","BITCOIN","BTC","ETH","ETHEREUM","COIN","TOKEN","BLOCKCHAIN","DEFI",
-        "XRP","DOGE","LTC","BCH","ALTCOIN","ALTCOINS"
-    ]
-    if any(k in q_upper for k in crypto_keywords):
+    if any(k in q_upper for k in _CRYPTO_KEYWORDS):
         return True
-    tickers = _extract_tickers_regex_only(query)
-    return any(t.replace("-USD","") in _CRYPTO_SYMBOLS for t in tickers)
+    # also consider explicit SYMBOL-USD form
+    if re.search(r"\b[A-Z0-9]{2,10}-USD\b", q_upper):
+        return True
+    return False
 
 def _detect_data_type(query: str) -> str:
     q_lower = (query or "").lower()
@@ -85,53 +92,38 @@ def _detect_data_type(query: str) -> str:
     return "general"
 
 # -----------------------------
-# Dynamic symbol resolution
+# Dynamic symbol resolution (single-source + crypto normalize)
 # -----------------------------
-@lru_cache(maxsize=512)
-def _alpha_vantage_symbol_search(query: str) -> Optional[str]:
-    api_key = os.getenv("ALPHAVANTAGE_API_KEY") or os.getenv("ALPHA_VANTAGE_API_KEY")
-    if not api_key:
-        return None
-    try:
-        url = "https://www.alphavantage.co/query"
-        params = {"function": "SYMBOL_SEARCH", "keywords": query, "apikey": api_key}
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        data = r.json() or {}
-        best = (data.get("bestMatches") or [])
-        def score(m):
-            region = (m.get("4. region") or "").upper()
-            t = (m.get("1. symbol") or "")
-            s = float((m.get("9. matchScore") or "0") or 0)
-            pref = 1.0 if region.startswith("UNITED STATES") else 0.0
-            return (pref, s, -len(t))
-        if best:
-            best.sort(key=score, reverse=True)
-            return best[0].get("1. symbol")
-    except Exception:
-        pass
-    return None
 
 @lru_cache(maxsize=512)
-def _finnhub_symbol_lookup(query: str) -> Optional[str]:
+def _finnhub_symbol_lookup_single(query: str) -> Optional[str]:
+    """
+    Resolve a free-text company name into a symbol using Finnhub.
+    Preference: US listings (NASDAQ/NYSE) and common equities.
+    """
     try:
         from utils.config import load_settings
         import finnhub
         settings = load_settings()
         client = finnhub.Client(api_key=settings.finnhub_api_key)
-        res = client.symbol_lookup(query)
+        res = client.symbol_lookup(query)  # {'count':..., 'result':[...]}
         items = (res or {}).get("result") or []
         if not items:
             return None
+
         def score(it):
             desc = (it.get("description") or "").upper()
             ty = (it.get("type") or "").upper()
             sym = (it.get("symbol") or "")
-            pref = 1.0 if ty in {"EQS","COMMON STOCK"} else 0.0
-            pref += 0.2 if "NYSE" in desc or "NASDAQ" in desc else 0.0
+            pref = 0.0
+            if "NASDAQ" in desc or "NYSE" in desc or "NEW YORK" in desc:
+                pref += 1.0
+            if ty in {"EQS", "COMMON STOCK", "EQUITY", "STOCK"}:
+                pref += 0.5
             return (pref, -len(sym))
+
         items.sort(key=score, reverse=True)
-        return items[0].get("symbol")
+        return items[0].get("symbol") or None
     except Exception:
         return None
 
@@ -141,55 +133,57 @@ def _maybe_build_crypto_symbol(token: str) -> Optional[str]:
         return None
     if t in _STOP:
         return None
-    if t in {"USD","USDT","USDC"}:
+    # ignore explicit stablecoins as a "base"
+    if t in {"USD", "USDT", "USDC"}:
         return None
     return f"{t}-USD"
 
-def _resolve_company_names_to_tickers_dynamic(text: str, is_crypto: bool) -> List[str]:
-    words = _tokenize_words(text)
-    candidates: List[str] = []
+def resolve_tickers(query: str) -> List[str]:
+    """
+    Minimal dynamic resolver (no redundancy):
+      1) If regex tickers exist in text, return them (deduped).
+      2) If crypto intent: try to normalize a token to SYMBOL-USD.
+      3) Else: use Finnhub symbol_lookup(query) to resolve (Microsoft -> MSFT).
+      4) If crypto intent and still nothing: last attempt build SYMBOL-USD.
+      5) Else: return [] (caller should fail-fast with a clear message).
+    """
+    # 1) direct tickers in text
+    rx = _extract_regex_tickers(query)
+    if rx:
+        seen, out = set(), []
+        for t in rx:
+            if t not in _STOP and t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out
 
+    # 2) crypto: normalize coin-like token
+    is_crypto = _detect_crypto_intent(query)
     if is_crypto:
-        for w in words:
-            s = _maybe_build_crypto_symbol(w)
-            if s:
-                candidates.append(s)
-                break
-        if candidates:
-            return candidates
-
-    q = " ".join([w for w in words if w.upper() not in _STOP]).strip()
-    if q:
-        sym = _finnhub_symbol_lookup(q)
-        if sym:
-            return [sym]
-        sym2 = _alpha_vantage_symbol_search(q)
-        if sym2:
-            return [sym2]
-
-    if is_crypto:
-        for w in words:
+        for w in _tokenize_words(query):
             s = _maybe_build_crypto_symbol(w)
             if s:
                 return [s]
 
-    return []
+    # 3) equity free text -> Finnhub
+    sym = _finnhub_symbol_lookup_single(query)
+    if sym:
+        return [sym.upper().strip()]
 
-def _extract_tickers(text: str) -> List[str]:
-    tickers = _extract_tickers_regex_only(text)
-    if not tickers:
-        is_crypto = _detect_crypto_intent(text)
-        tickers = _resolve_company_names_to_tickers_dynamic(text, is_crypto)
-    seen, out = set(), []
-    for t in tickers:
-        if t and t not in _STOP and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
+    # 4) last crypto attempt
+    if is_crypto:
+        for w in _tokenize_words(query):
+            s = _maybe_build_crypto_symbol(w)
+            if s:
+                return [s]
+
+    # 5) nothing
+    return []
 
 # -----------------------------
 # Server & tool selection
 # -----------------------------
+
 def _select_best_server(query: str, available_servers: Dict[str, MCPServer]) -> Optional[str]:
     is_crypto = _detect_crypto_intent(query)
     if is_crypto:
@@ -270,7 +264,7 @@ def _choose_tool_from_available(server: str, query: str, data_type: str, tool_na
             return "get_yahoo_finance_news"
         if any(w in q for w in ["dividend", "dividends", "split", "splits"]) and "get_stock_actions" in names:
             return "get_stock_actions"
-        if any(w in q for w in ["financial statement","balance sheet","income statement","cashflow","cash flow"]) and "get_financial_statement" in names:
+        if any(w in q for w in ["financial statement", "balance sheet", "income statement", "cashflow", "cash flow"]) and "get_financial_statement" in names:
             return "get_financial_statement"
         if "option" in q and "get_option_chain" in names:
             return "get_option_chain"
@@ -295,6 +289,7 @@ def _choose_tool_from_available(server: str, query: str, data_type: str, tool_na
 # -----------------------------
 # Options helpers
 # -----------------------------
+
 def _parse_yyyy_mm_dd(d: str) -> Optional[date]:
     try:
         return datetime.strptime(d, "%Y-%m-%d").date()
@@ -302,6 +297,9 @@ def _parse_yyyy_mm_dd(d: str) -> Optional[date]:
         return None
 
 def _pick_best_expiry(dates: List[str]) -> Optional[str]:
+    """
+    Choose the soonest future expiration, else latest historical.
+    """
     today = date.today()
     parsed = [(_parse_yyyy_mm_dd(s), s) for s in dates if isinstance(s, str)]
     parsed = [(dt, raw) for dt, raw in parsed if dt is not None]
@@ -314,31 +312,36 @@ def _pick_best_expiry(dates: List[str]) -> Optional[str]:
     return past[-1][1] if past else None
 
 # -----------------------------
-# Args builder guided by schema
+# Args builder (guided by schema)
 # -----------------------------
+
 def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query: str, tickers: List[str]) -> Dict[str, Any]:
+    """
+    Build arguments guided by the tool's input schema.
+    - No hardcoded primary fallback (no AAPL/BTC).
+    - If the schema requires a ticker/symbol and none was resolved, caller should fail-fast.
+    """
     schema = tool.get("inputSchema") or {}
     props = schema.get("properties") if isinstance(schema, dict) else {}
     req = schema.get("required") if isinstance(schema, dict) else []
 
-    is_crypto = _detect_crypto_intent(query)
-    primary = tickers[0] if tickers else ("BTC" if is_crypto else "AAPL")
-    if is_crypto and "-" not in primary and primary in _CRYPTO_SYMBOLS:
-        primary = f"{primary}-USD"
-
     args: Dict[str, Any] = {}
 
+    # set ticker/symbol only if present in schema and we actually resolved one
+    primary = tickers[0] if tickers else None
     if isinstance(props, dict):
-        if "ticker" in props:
+        if "ticker" in props and primary:
             args["ticker"] = primary
-        elif "symbol" in props:
+        elif "symbol" in props and primary:
             args["symbol"] = primary
 
+        # sensible defaults for time windows if present in schema
         if "period" in props:
             args.setdefault("period", "1y")
         if "interval" in props:
             args.setdefault("interval", "1d")
 
+        # financial-datasets style historical schema
         y = datetime.now().year
         if "start_date" in props:
             args.setdefault("start_date", f"{y-1}-01-01")
@@ -348,50 +351,48 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
             args.setdefault("interval", "day")
             args.setdefault("interval_multiplier", 1)
 
+        # yfinance financial statements
         if tool.get("name") == "get_financial_statement" and "financial_type" in props:
             args.setdefault("financial_type", "income_stmt")
 
+        # options chain: choose best expiration if we have a ticker
         if tool.get("name") == "get_option_chain":
             if "option_type" in props:
                 qt = (query or "").lower()
-                if "puts" in qt or "put" in qt:
-                    args.setdefault("option_type", "puts")
-                else:
-                    args.setdefault("option_type", "calls")
+                args.setdefault("option_type", "puts" if ("puts" in qt or "put" in qt) else "calls")
 
             if "expiration_date" in props:
-                ticker_arg = args.get("ticker") or args.get("symbol") or primary
-                try:
-                    raw = manager.call_sync(server, "get_option_expiration_dates", {"ticker": ticker_arg})
-                    data = _safe_json_loads(raw)
-                    if isinstance(data, list):
-                        best = _pick_best_expiry(data)
-                    else:
-                        lines = raw.splitlines() if isinstance(raw, str) else []
-                        candidates = [ln.strip() for ln in lines if _parse_yyyy_mm_dd(ln.strip())]
-                        best = _pick_best_expiry(candidates)
-                    if best:
-                        args.setdefault("expiration_date", best)
-                except Exception:
-                    pass
+                ticker_arg = args.get("ticker") or args.get("symbol")
+                if ticker_arg:
+                    try:
+                        raw = manager.call_sync(server, "get_option_expiration_dates", {"ticker": ticker_arg})
+                        data = _safe_json_loads(raw)
+                        if isinstance(data, list):
+                            best = _pick_best_expiry(data)
+                        else:
+                            # try to parse lines for YYYY-MM-DD
+                            lines = raw.splitlines() if isinstance(raw, str) else []
+                            candidates = [ln.strip() for ln in lines if _parse_yyyy_mm_dd(ln.strip())]
+                            best = _pick_best_expiry(candidates)
+                        if best:
+                            args.setdefault("expiration_date", best)
+                    except Exception:
+                        pass
 
-    if isinstance(req, list):
-        for r in req:
-            if r not in args and r in ("ticker", "symbol"):
-                args[r] = primary
-
+    # caller will check required fields and decide whether to fail-fast
     return args
 
 # -----------------------------
 # Public API
 # -----------------------------
+
 def route_and_call(query: str) -> str:
     try:
         available_servers = MCPServer.from_env()
         if not available_servers:
             return "No MCP servers configured. Please check MCP_SERVERS in .env"
 
-        tickers = _extract_tickers(query)
+        tickers = resolve_tickers(query)
         data_type = _detect_data_type(query)
         is_crypto = _detect_crypto_intent(query)
 
@@ -413,6 +414,13 @@ def route_and_call(query: str) -> str:
         tool_obj = tools_map.get(tool_name, {"name": tool_name})
 
         args = _build_args_from_schema(manager, server, tool_obj, query, tickers)
+
+        # If the tool schema requires a ticker/symbol and we don't have one -> friendly fail-fast
+        schema = tool_obj.get("inputSchema") or {}
+        req = (schema.get("required") if isinstance(schema, dict) else None) or []
+        requires_symbol = any(r in ("ticker", "symbol") for r in req)
+        if requires_symbol and not (args.get("ticker") or args.get("symbol")):
+            return "Could not resolve a ticker from the query. Please specify a symbol (e.g., MSFT)."
 
         routing_info = f"Route: {server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | Tickers: {tickers}"
         result = manager.call_sync(server, tool_name, args)
