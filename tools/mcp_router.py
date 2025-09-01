@@ -6,20 +6,20 @@ import json
 import asyncio
 from functools import lru_cache
 from datetime import datetime, date
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple, Iterable
 
 from agno.tools import tool
 from rag.fusion import fuse
 from mcp_connection.manager import MCPManager, MCPServer
 
 # -----------------------------
-# Constants & heuristics 
+# Regexes & constants
 # -----------------------------
 
 # Strict ticker regex: e.g., MSFT, NVDA, GOOGL, BRK.B, XRP-USD
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z0-9]{1,6})?\b")
 
-# Words we never treat as tickers
+# Words we never treat as tickers (generic stop list)
 _STOP = {
     "USD", "USDT", "USDC",
     "PE", "EV", "EPS", "ETF",
@@ -29,7 +29,7 @@ _STOP = {
     "PLEASE", "GET", "GIVE", "WITH",
 }
 
-# Single crypto keyword set (no duplicate symbol lists)
+# Crypto-intent keywords (no mapping to specific coins, purely intent)
 _CRYPTO_KEYWORDS = {
     "CRYPTO", "BITCOIN", "BTC", "ETH", "ETHEREUM", "COIN", "TOKEN", "BLOCKCHAIN", "DEFI",
     "XRP", "DOGE", "LTC", "BCH", "SOL", "ADA", "MATIC", "AVAX", "LINK",
@@ -38,7 +38,7 @@ _CRYPTO_KEYWORDS = {
 
 VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
 
-# Known toolsets per MCP server (used to intersect with dynamic discovery)
+# Known toolsets per MCP server (only for ranking; we still discover dynamically)
 KNOWN_TOOLSETS: Dict[str, List[str]] = {
     "yfinance": [
         "get_stock_info",
@@ -75,7 +75,7 @@ def _detect_crypto_intent(query: str) -> bool:
     q_upper = (query or "").upper()
     if any(k in q_upper for k in _CRYPTO_KEYWORDS):
         return True
-    # also consider explicit SYMBOL-USD form
+    # explicit SYMBOL-USD form is also crypto intent
     if re.search(r"\b[A-Z0-9]{2,10}-USD\b", q_upper):
         return True
     return False
@@ -93,15 +93,12 @@ def _detect_data_type(query: str) -> str:
     return "general"
 
 # -----------------------------
-# Dynamic symbol resolution (single-source + crypto normalize)
+# Symbol resolution (dynamic, minimal assumptions)
 # -----------------------------
 
 @lru_cache(maxsize=512)
 def _finnhub_symbol_lookup_single(query: str) -> Optional[str]:
-    """
-    Resolve a free-text company name into a symbol using Finnhub.
-    Preference: US listings (NASDAQ/NYSE) and common equities.
-    """
+    """Free-text -> listed equity symbol using Finnhub. Prefers common US listings; no hard-coding."""
     try:
         from utils.config import load_settings
         import finnhub
@@ -124,31 +121,33 @@ def _finnhub_symbol_lookup_single(query: str) -> Optional[str]:
             return (pref, -len(sym))
 
         items.sort(key=score, reverse=True)
-        return items[0].get("symbol") or None
+        return (items[0].get("symbol") or "").upper().strip() or None
     except Exception:
         return None
 
 def _maybe_build_crypto_symbol(token: str) -> Optional[str]:
+    """
+    Turn a bare coin-like token into a common quoted symbol base-USD (generic, no hard-coded asset lists).
+    """
     t = (token or "").strip().upper()
     if not re.fullmatch(r"[A-Z0-9]{2,10}", t):
         return None
     if t in _STOP:
         return None
-    # ignore explicit stablecoins as a "base"
     if t in {"USD", "USDT", "USDC"}:
         return None
     return f"{t}-USD"
 
 def resolve_tickers(query: str) -> List[str]:
     """
-    Minimal dynamic resolver (no redundancy):
+    Dynamic resolver:
       1) If regex tickers exist in text, return them (deduped).
       2) If crypto intent: try to normalize a token to SYMBOL-USD.
-      3) Else: use Finnhub symbol_lookup(query) to resolve (Microsoft -> MSFT).
-      4) If crypto intent and still nothing: last attempt build SYMBOL-USD.
-      5) Else: return [] (caller should fail-fast with a clear message).
+      3) Else: use Finnhub symbol_lookup(query) to resolve (e.g., 'Microsoft' -> 'MSFT').
+      4) If crypto intent and still nothing: last attempt build SYMBOL-USD from tokens.
+      5) Else: [].
     """
-    # 1) direct tickers in text
+    # 1) direct tickers
     rx = _extract_regex_tickers(query)
     if rx:
         seen, out = set(), []
@@ -158,7 +157,7 @@ def resolve_tickers(query: str) -> List[str]:
                 out.append(t)
         return out
 
-    # 2) crypto: normalize coin-like token
+    # 2) crypto token -> base-USD
     is_crypto = _detect_crypto_intent(query)
     if is_crypto:
         for w in _tokenize_words(query):
@@ -166,12 +165,12 @@ def resolve_tickers(query: str) -> List[str]:
             if s:
                 return [s]
 
-    # 3) equity free text -> Finnhub
+    # 3) equity free text
     sym = _finnhub_symbol_lookup_single(query)
     if sym:
-        return [sym.upper().strip()]
+        return [sym]
 
-    # 4) last crypto attempt
+    # 4) fallback for crypto
     if is_crypto:
         for w in _tokenize_words(query):
             s = _maybe_build_crypto_symbol(w)
@@ -302,9 +301,7 @@ def _parse_yyyy_mm_dd(d: str) -> Optional[date]:
         return None
 
 def _pick_best_expiry(dates: List[str]) -> Optional[str]:
-    """
-    Choose the soonest future expiration, else latest historical.
-    """
+    """Choose the soonest future expiration, else latest historical."""
     today = date.today()
     parsed = [(_parse_yyyy_mm_dd(s), s) for s in dates if isinstance(s, str)]
     parsed = [(dt, raw) for dt, raw in parsed if dt is not None]
@@ -322,17 +319,61 @@ def _call_tool_blocking(manager: MCPManager, server: str, tool_name: str, args: 
     res = manager.call(server, tool_name, args)
     return asyncio.run(res) if asyncio.iscoroutine(res) else res
 
-
-
 # -----------------------------
-# Args builder (guided by schema)
+# Dynamic argument build + robust retries for value formats
 # -----------------------------
+
+def _iter_symbol_variants(value: str, is_crypto: bool) -> Iterable[str]:
+    """
+    Generate a sequence of generic, normalized variants for ticker/symbol values.
+    No hard-coded asset maps; only structural transforms.
+    """
+    if not isinstance(value, str):
+        return [value]  # type: ignore[return-value]
+
+    v0 = value.strip().upper()
+    # base normalization
+    forms = set()
+    candidates = [v0]
+
+    # strip non-alnum and dash, unify separators
+    cleaned = re.sub(r"[^A-Z0-9\-]", "", v0).replace("_", "-")
+    if cleaned and cleaned not in candidates:
+        candidates.append(cleaned)
+
+    # add with -USD suffix (for crypto), or remove it if present to try bare
+    if is_crypto:
+        base = re.sub(r"[-_](USD|USDT|USDC)$", "", cleaned)
+        if base:
+            with_usd = f"{base}-USD"
+            if with_usd not in candidates:
+                candidates.append(with_usd)
+            # also bare base as a try (some APIs accept BASE only)
+            if base not in candidates:
+                candidates.append(base)
+
+    # alt separators
+    if is_crypto:
+        if "/" in value:
+            candidates.append(value.replace("/", "-"))
+        if "-" in value:
+            candidates.append(value.replace("-", ""))
+        if ":" in value:
+            candidates.append(value.replace(":", "-"))
+        if "_" in value:
+            candidates.append(value.replace("_", "-"))
+
+    # yield in order, dedup
+    seen = set()
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            yield c
 
 def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query: str, tickers: List[str]) -> Dict[str, Any]:
     """
-    Build arguments guided by the tool's input schema.
-    - No hardcoded primary fallback (no AAPL/BTC).
-    - If the schema requires a ticker/symbol and none was resolved, caller should fail-fast.
+    Build arguments guided by the tool's input schema (if available).
+    No hardcoded defaults to specific assets; only structural defaults (period/interval windows).
     """
     schema = tool.get("inputSchema") or {}
     props = schema.get("properties") if isinstance(schema, dict) else {}
@@ -340,7 +381,6 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
 
     args: Dict[str, Any] = {}
 
-    # set ticker/symbol only if present in schema and we actually resolved one
     primary = tickers[0] if tickers else None
     if isinstance(props, dict):
         if "ticker" in props and primary:
@@ -348,7 +388,7 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
         elif "symbol" in props and primary:
             args["symbol"] = primary
 
-        # sensible defaults for time windows if present in schema
+        # generic time-window defaults if present
         if "period" in props:
             args.setdefault("period", "1y")
         if "interval" in props:
@@ -368,7 +408,7 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
         if tool.get("name") == "get_financial_statement" and "financial_type" in props:
             args.setdefault("financial_type", "income_stmt")
 
-        # options chain: choose best expiration if we have a ticker
+        # options chain: choose best expiration if possible
         if tool.get("name") == "get_option_chain":
             if "option_type" in props:
                 qt = (query or "").lower()
@@ -383,7 +423,6 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
                         if isinstance(data, list):
                             best = _pick_best_expiry(data)
                         else:
-                            # try to parse lines for YYYY-MM-DD
                             lines = raw.splitlines() if isinstance(raw, str) else []
                             candidates = [ln.strip() for ln in lines if _parse_yyyy_mm_dd(ln.strip())]
                             best = _pick_best_expiry(candidates)
@@ -392,8 +431,40 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
                     except Exception:
                         pass
 
-    # caller will check required fields and decide whether to fail-fast
     return args
+
+def _call_with_symbol_variants(manager: MCPManager, server: str, tool_name: str, args: Dict[str, Any], is_crypto: bool) -> str:
+    """
+    Try calling the tool with multiple normalized variants of ticker/symbol values.
+    This is generic retry logic that avoids hard-coding specific asset maps.
+    """
+    # detect which key to vary
+    symbol_keys = [k for k in args.keys() if k.lower() in ("ticker", "symbol")]
+    if not symbol_keys:
+        # nothing to vary
+        return _call_tool_blocking(manager, server, tool_name, args)
+
+    last_err: Optional[Exception] = None
+    # try each symbol-bearing key independently (usually just one)
+    for key in symbol_keys:
+        original = args[key]
+        variants = list(_iter_symbol_variants(str(original), is_crypto))
+        # try in declared order; if first works we return immediately
+        for v in variants:
+            trial = dict(args)
+            trial[key] = v
+            try:
+                return _call_tool_blocking(manager, server, tool_name, trial)
+            except Exception as e:
+                last_err = e
+                continue
+        # restore for next key
+        args[key] = original
+
+    if last_err:
+        raise last_err
+    # fallback (unlikely)
+    return _call_tool_blocking(manager, server, tool_name, args)
 
 # -----------------------------
 # Public API
@@ -428,7 +499,7 @@ def route_and_call(query: str) -> str:
 
         args = _build_args_from_schema(manager, server, tool_obj, query, tickers)
 
-        # If the tool schema requires a ticker/symbol and we don't have one -> friendly fail-fast
+        # If schema explicitly requires ticker/symbol and we don't have one -> friendly fail-fast
         schema = tool_obj.get("inputSchema") or {}
         req = (schema.get("required") if isinstance(schema, dict) else None) or []
         requires_symbol = any(r in ("ticker", "symbol") for r in req)
@@ -436,7 +507,10 @@ def route_and_call(query: str) -> str:
             return "Could not resolve a ticker from the query. Please specify a symbol (e.g., MSFT)."
 
         routing_info = f"Route: {server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | Tickers: {tickers}"
-        result = _call_tool_blocking(manager, server, tool_name, args)
+
+        # Robust call with generic symbol-format retries
+        result = _call_with_symbol_variants(manager, server, tool_name, args, is_crypto)
+
         return f"{routing_info}\n\n{result}"
 
     except Exception as e:
