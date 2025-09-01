@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import re
 import json
+import math
 import asyncio
 from functools import lru_cache
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any
 
-import yfinance as yf  # for multi-step validation
+import yfinance as yf  # validation only
 
 from agno.tools import tool
 from rag.fusion import fuse
@@ -18,6 +19,7 @@ from mcp_connection.manager import MCPManager, MCPServer
 # Constants & heuristics
 # =============================
 
+# e.g., MSFT, BRK.B, TSLA, XRP-USD
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z0-9]{1,6})?\b")
 
 _STOP = {
@@ -101,7 +103,7 @@ def _detect_data_type(query: str) -> str:
 
 
 # =============================
-# Symbol validation & lookup (robust)
+# Symbol validation (robust Yahoo)
 # =============================
 
 def _is_stop(token: str) -> bool:
@@ -110,10 +112,80 @@ def _is_stop(token: str) -> bool:
 def _looks_like_equity_symbol(token: str) -> bool:
     return bool(re.fullmatch(r"[A-Z]{1,5}(?:\.[A-Z]{1,3})?", token))
 
-@lru_cache(maxsize=512)
-def _clean_free_text_for_lookup(q: str) -> str:
-    words = [w for w in _tok(q.lower()) if w.upper() not in _STOP]
-    return " ".join(words)
+def _is_number(x: Any) -> bool:
+    try:
+        return x is not None and not (isinstance(x, bool)) and math.isfinite(float(x))
+    except Exception:
+        return False
+
+@lru_cache(maxsize=1024)
+def _validate_equity_symbol_yahoo(sym: str) -> bool:
+    """
+    Strong Yahoo validation:
+      - Success if 1-day history is non-empty.
+      - Else, success only if fast_info/regularMarketPrice is numeric AND quoteType/market look sane.
+    This avoids false-positives like 'APPL'.
+    """
+    try:
+        t = yf.Ticker(sym)
+
+        # 1) Try recent history – most reliable
+        try:
+            hist = t.history(period="1d", interval="1d", prepost=False)
+            if hasattr(hist, "empty") and not hist.empty:
+                return True
+        except Exception:
+            pass
+
+        # 2) Fallback on fast_info / info with stricter checks
+        price = None
+        try:
+            # fast_info is faster and less error-prone when available
+            fi = getattr(t, "fast_info", None)
+            if fi and hasattr(fi, "last_price"):
+                price = getattr(fi, "last_price")
+        except Exception:
+            pass
+
+        if price is None:
+            try:
+                info = t.info or {}
+            except Exception:
+                info = {}
+            price = info.get("regularMarketPrice")
+            quote_type = (info.get("quoteType") or "").upper()
+            market = (info.get("market") or info.get("fullExchangeName") or "").upper()
+            symbol_echo = (info.get("symbol") or "").upper()
+
+            # Require BOTH: numeric price AND plausible quoteType/market,
+            # and symbol echo (if present) should match candidate prefix (avoid random echoes)
+            if _is_number(price) and (quote_type in {"EQUITY", "ETF", "MUTUALFUND", "INDEX", "CRYPTOCURRENCY"} or "NASDAQ" in market or "NYSE" in market):
+                if not symbol_echo or sym.startswith(symbol_echo[:len(sym)]):
+                    return True
+            return False
+
+        # fast_info price numeric is good enough
+        return _is_number(price)
+
+    except Exception:
+        return False
+
+
+# =============================
+# Finnhub lookup with better ranking
+# =============================
+
+def _words(s: str) -> List[str]:
+    return re.findall(r"[A-Z0-9]+", (s or "").upper())
+
+def _whole_word_hits(query_words: List[str], text_words: List[str]) -> int:
+    tw = set(text_words)
+    return sum(1 for w in query_words if w in tw)
+
+def _substring_hits(query: str, text: str) -> int:
+    q = (query or "").upper()
+    t = (text or "").upper()
+    return sum(1 for w in _words(q) if w and w in t)
 
 @lru_cache(maxsize=512)
 def _candidate_queries_for_lookup(q: str) -> List[str]:
@@ -122,20 +194,19 @@ def _candidate_queries_for_lookup(q: str) -> List[str]:
     if orig:
         cands.append(orig)
 
-    cleaned = _clean_free_text_for_lookup(orig)
+    # cleaned
+    toks = [t for t in _tok(orig) if t.upper() not in _STOP]
+    cleaned = " ".join(toks)
     if cleaned and cleaned != orig:
         cands.append(cleaned)
 
-    toks = [t for t in _tok(orig) if t.upper() not in _STOP]
+    # unigrams / bigrams / trigrams
     for t in toks:
-        if t:
-            cands.append(t)
-    if len(toks) >= 2:
-        for i in range(len(toks) - 1):
-            cands.append(f"{toks[i]} {toks[i+1]}")
-    if len(toks) >= 3:
-        for i in range(len(toks) - 2):
-            cands.append(f"{toks[i]} {toks[i+1]} {toks[i+2]}")
+        cands.append(t)
+    for i in range(len(toks) - 1):
+        cands.append(f"{toks[i]} {toks[i+1]}")
+    for i in range(len(toks) - 2):
+        cands.append(f"{toks[i]} {toks[i+1]} {toks[i+2]}")
 
     seen, out = set(), []
     for c in cands:
@@ -144,37 +215,8 @@ def _candidate_queries_for_lookup(q: str) -> List[str]:
             out.append(c)
     return out
 
-@lru_cache(maxsize=1024)
-def _validate_equity_symbol_yahoo(sym: str) -> bool:
-    """
-    Strong Yahoo validation:
-      - 1) quick history fetch (1d). If non-empty -> valid.
-      - 2) else try to access .info and ensure a symbol/price-like field exists.
-    """
-    try:
-        t = yf.Ticker(sym)
-        try:
-            hist = t.history(period="1d", interval="1d", prepost=False)
-            if hasattr(hist, "empty") and not hist.empty:
-                return True
-        except Exception:
-            pass
-
-        try:
-            info = t.info or {}
-            # minimal existence checks
-            if info.get("symbol") or info.get("regularMarketPrice") or info.get("shortName"):
-                return True
-        except Exception:
-            pass
-
-        return False
-    except Exception:
-        return False
-
 @lru_cache(maxsize=512)
 def _lookup_equity_symbol_finnhub_one(query: str) -> Optional[str]:
-    """Single Finnhub lookup for a query string; prefers NASDAQ/NYSE & equity-like."""
     try:
         from utils.config import load_settings
         import finnhub
@@ -185,20 +227,37 @@ def _lookup_equity_symbol_finnhub_one(query: str) -> Optional[str]:
         if not items:
             return None
 
+        qw = _words(query)
+
         def score(it):
-            desc = (it.get("description") or "").upper()
-            ty = (it.get("type") or "").upper()
+            desc = (it.get("description") or "")
+            ty = (it.get("type") or "")
             sym = (it.get("symbol") or "")
-            pref = 0.0
-            if "NASDAQ" in desc or "NYSE" in desc or "NEW YORK" in desc:
-                pref += 1.0
-            if ty in {"EQS", "COMMON STOCK", "EQUITY", "STOCK"}:
-                pref += 0.5
-            return (pref, -len(sym))
+            dw = _words(desc)
+
+            s = 0.0
+            # exact symbol preference if user wrote symbol explicitly
+            if sym.upper() in _words(query):
+                s += 5.0
+            # whole-word matches (avoid 'pineAPPLE')
+            s += 3.0 * _whole_word_hits(qw, dw)
+            # name startswith
+            if dw and qw and " ".join(dw).startswith(" ".join(qw)):
+                s += 1.5
+            # substring matches give tiny weight only
+            s += 0.25 * _substring_hits(query, desc)
+            # prefer US exchanges/types
+            if "NASDAQ" in desc.upper() or "NYSE" in desc.upper():
+                s += 1.0
+            if ty.upper() in {"EQS", "COMMON STOCK", "EQUITY", "STOCK"}:
+                s += 0.5
+            # shorter symbols slightly preferred
+            s += max(0.0, 1.5 - 0.1 * len(sym))
+            return s
 
         items.sort(key=score, reverse=True)
-        sym = (items[0].get("symbol") or "").upper().strip()
-        return sym or None
+        best = (items[0].get("symbol") or "").upper().strip()
+        return best or None
     except Exception:
         return None
 
@@ -208,6 +267,11 @@ def _lookup_equity_symbol_finnhub(q: str) -> Optional[str]:
         if sym and _validate_equity_symbol_yahoo(sym):
             return sym
     return None
+
+
+# =============================
+# Crypto helpers
+# =============================
 
 def _maybe_crypto_symbol(token: str) -> Optional[str]:
     t = (token or "").upper().strip()
@@ -225,18 +289,23 @@ def _dedupe(seq: List[str]) -> List[str]:
             out.append(x)
     return out
 
+
+# =============================
+# Public resolver
+# =============================
+
 def resolve_tickers(query: str) -> List[str]:
     """
-    Robust, dynamic resolver:
-      1) Regex candidates are ACCEPTED ONLY if they pass strong Yahoo validation (history/info).
-      2) If crypto intent and no SYMBOL-USD found, try to normalize from a token.
-      3) If nothing (or candidates invalid) and not crypto -> Finnhub multi-candidate lookup, then validate via Yahoo.
+    Robust resolver:
+      1) Regex candidates are accepted ONLY if they pass strict Yahoo validation.
+      2) If crypto intent, try SYMBOL-USD normalization from a token.
+      3) Otherwise use Finnhub multi-candidate lookup with whole-word ranking, then validate via Yahoo.
       4) Return deduped list (possibly empty).
     """
     q_up = (query or "").upper()
     out: List[str] = []
 
-    # 1) regex candidates that truly validate
+    # 1) regex candidates with strict validation
     for tok in _extract_regex_tickers(q_up):
         if _is_stop(tok):
             continue
@@ -257,7 +326,7 @@ def resolve_tickers(query: str) -> List[str]:
     if out:
         return _dedupe(out)
 
-    # 3) free-text equity lookup with multiple candidates
+    # 3) free-text equity lookup via Finnhub
     if not is_crypto:
         sym = _lookup_equity_symbol_finnhub(query)
         if sym and _validate_equity_symbol_yahoo(sym):
@@ -475,7 +544,7 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
 
 
 # =============================
-# Public API
+# Routing
 # =============================
 
 def route_and_call(query: str) -> str:
@@ -512,6 +581,7 @@ def route_and_call(query: str) -> str:
         needs_symbol = ("ticker" in props or "symbol" in props) or any(r in ("ticker", "symbol") for r in required)
 
         if needs_symbol and not (args.get("ticker") or args.get("symbol")):
+            # last-attempt lookup
             sym = _lookup_equity_symbol_finnhub(query)
             if sym and _validate_equity_symbol_yahoo(sym):
                 args["ticker"] = sym
