@@ -10,6 +10,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from dotenv import load_dotenv, find_dotenv
 
 def check_env_file():
     """Check if .env file exists and has required variables."""
@@ -138,6 +139,8 @@ def run_application():
 
 def main():
     """Main setup and run function."""
+    # Load .env deterministically before anything else
+    load_dotenv(find_dotenv(usecwd=True), override=True)
     print("🔍 FinSight Setup & Validation")
     print("=" * 40)
     

@@ -13,7 +13,7 @@ import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 
-from .manager import MCPServer
+from .manager import MCPServerת, MCPManager
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +36,9 @@ class MCPServerManager:
             else:
                 cmd = server.command.split()
             
-            # Prepare environment
-            env = os.environ.copy()
-            if server.env:
-                env.update(server.env)
+            # Prepare environment (inherit + overlay) and cwd consistently with MCPManager
+            env = MCPManager.build_child_env(server.env)
+            cwd = MCPManager.resolve_cwd(server.cwd)
             
             # Start process
             process = subprocess.Popen(
@@ -48,7 +47,7 @@ class MCPServerManager:
                 stderr=subprocess.PIPE,
                 text=True,
                 env=env,
-                cwd=Path.cwd()
+                cwd=cwd
             )
             
             self.processes[name] = process
