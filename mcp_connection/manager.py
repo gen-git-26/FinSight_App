@@ -105,13 +105,16 @@ class MCPManager:
 
         srv = self.servers[server_name]
 
+        merged_env = os.environ.copy()
+        if srv.env:
+            merged_env.update(srv.env)
         params = StdioServerParameters(
             command=srv.command,
             args=srv.args or [],
-            env=srv.env or {},
+            env=merged_env,
             cwd=srv.cwd,
         )
-
+        
         # Debug spawn line
         print(
             "[MCP spawn]",
