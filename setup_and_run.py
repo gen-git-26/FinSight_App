@@ -1,224 +1,169 @@
 # setup_and_run.py
-
 """
-MCP Server Startup Manager
-Automatically starts and manages MCP servers when the application loads.
+FinSight Setup and Run Script
+Helps set up and verify the MCP connections before running the main application.
 """
 
 import os
 import sys
-import shlex
+import json
 import subprocess
-import threading
 import time
-import logging
-from typing import Dict, Optional
 from pathlib import Path
+from dotenv import load_dotenv, find_dotenv
 
-from mcp_connection.manager import MCPServer, MCPManager
+def check_env_file():
+    """Check if .env file exists and has required variables."""
+    env_path = Path(".env")
+    if not env_path.exists():
+        print(".env file not found!")
+        return False
+    
+    required_vars = [
+        "OPENAI_API_KEY",
+        "FINNHUB_API_KEY", 
+        "ALPHAVANTAGE_API_KEY",
+        "FINANCIAL_DATASETS_API_KEY",
+        "QDRANT_URL",
+        "QDRANT_API_KEY",
+        "MCP_SERVERS"
+    ]
+    
+    missing_vars = []
+    with open(env_path) as f:
+        content = f.read()
+        for var in required_vars:
+            if f"{var}=" not in content or f"{var}=\n" in content:
+                missing_vars.append(var)
+    
+    if missing_vars:
+        print(f"Missing or empty environment variables: {', '.join(missing_vars)}")
+        return False
+    
+    print(".env file looks good")
+    return True
 
-logger = logging.getLogger(__name__)
-
-
-class MCPServerManager:
-    """Manages the lifecycle of MCP servers."""
-
-    def __init__(self):
-        self.processes: Dict[str, subprocess.Popen] = {}
-        self.startup_threads: Dict[str, threading.Thread] = {}
-        self.startup_timeout = 30  # seconds
-
-    def _build_cmd(self, server: MCPServer) -> Optional[list]:
-        """
-        Build a robust command vector from server.command and server.args.
-        Supports:
-          - command as string with embedded args
-          - command as string without args
-          - command as list (vector form)
-          - args as list or empty
-        """
-        base: list
-        if isinstance(server.command, list):
-            base = [str(p) for p in server.command if str(p).strip()]
-        else:
-            s = (server.command or "").strip()
-            base = shlex.split(s) if s else []
-
-        extra = server.args or []
-        cmd = base + extra
-        return cmd if cmd else None
-
-    def _start_server_process(self, name: str, server: MCPServer) -> bool:
-        """Start a single MCP server process."""
-        try:
-            logger.info(f"Starting MCP server: {name}")
-
-            cmd = self._build_cmd(server)
-            if not cmd:
-                logger.error(f"Empty command for MCP server '{name}'")
-                return False
-
-            # Prepare environment and working directory consistently with MCPManager
-            env = MCPManager.build_child_env(server.env)
-            cwd = MCPManager.resolve_cwd(server.cwd)
-
-            logger.debug(f"Exec for '{name}': cmd={cmd}, cwd={cwd}")
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-                cwd=cwd,
-            )
-
-            self.processes[name] = process
-            logger.info(f"MCP server '{name}' started with PID {process.pid}")
-
-            # Monitor process health
-            def monitor():
-                # Give it time to start
-                time.sleep(2)
-                if process.poll() is not None:
-                    stdout, stderr = process.communicate()
-                    logger.error(f"MCP server '{name}' failed to start")
-                    # Print minimal but useful diagnostics
-                    env_delta = {k: env[k] for k in ("PYTHONUNBUFFERED", "OPENAI_API_KEY", "FINANCIAL_DATASETS_API_KEY") if k in env}
-                    logger.error(f"Command: {cmd}")
-                    logger.error(f"CWD: {cwd}")
-                    logger.error(f"ENV keys: {list(env.keys())[:5]}... total={len(env)} delta={env_delta}")
-                    logger.error(f"STDOUT:\n{stdout}")
-                    logger.error(f"STDERR:\n{stderr}")
+def validate_mcp_servers():
+    """Validate MCP_SERVERS configuration."""
+    mcp_servers = os.getenv("MCP_SERVERS", "")
+    if not mcp_servers:
+        print("MCP_SERVERS not configured")
+        return False
+    
+    try:
+        servers = json.loads(mcp_servers)
+        print(f"Found {len(servers)} MCP servers configured:")
+        
+        for server in servers:
+            name = server.get("name", "unknown")
+            command = server.get("command", "")
+            print(f"  • {name}: {command}")
+            
+            # Check if command path exists for Python scripts
+            if command.startswith("/workspaces/new_test/.venv/bin/python"):
+                python_path = command.split()[0]
+                if not Path(python_path).exists():
+                    print(f"    Python path doesn't exist: {python_path}")
                 else:
-                    logger.info(f"MCP server '{name}' is healthy")
-
-            t = threading.Thread(target=monitor, daemon=True)
-            t.start()
-            self.startup_threads[name] = t
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to start MCP server '{name}': {e}")
-            return False
-
-    def start_all_servers(self) -> Dict[str, bool]:
-        """Start all configured MCP servers."""
-        servers = MCPServer.from_env()
-        results: Dict[str, bool] = {}
-
-        if not servers:
-            logger.warning("No MCP servers configured in environment")
-            return results
-
-        logger.info(f"Starting {len(servers)} MCP servers...")
-
-        for name, server in servers.items():
-            success = self._start_server_process(name, server)
-            results[name] = success
-            if success:
-                logger.info(f"Server '{name}' startup initiated")
-            else:
-                logger.error(f"Server '{name}' startup failed")
-
-        # Wait a moment for all servers to initialize
-        time.sleep(3)
-        return results
-
-    def stop_all_servers(self):
-        """Stop all running MCP servers."""
-        logger.info("Stopping all MCP servers...")
-
-        for name, process in list(self.processes.items()):
-            try:
-                if process.poll() is None:
-                    logger.info(f"Stopping server: {name}")
-                    process.terminate()
-                    # Wait for graceful shutdown
-                    try:
-                        process.wait(timeout=5)
-                        logger.info(f"Server '{name}' stopped gracefully")
-                    except subprocess.TimeoutExpired:
-                        logger.warning(f"Force killing server: {name}")
-                        process.kill()
-                        process.wait()
-                        logger.info(f"Server '{name}' force stopped")
-                else:
-                    logger.info(f"Server '{name}' already stopped")
-            except Exception as e:
-                logger.error(f"Error stopping server '{name}': {e}")
-
-            self.processes.pop(name, None)
-
-        logger.info("All MCP servers stopped")
-
-    def get_server_status(self) -> Dict[str, str]:
-        """Get the status of all servers."""
-        status: Dict[str, str] = {}
-
-        for name, process in self.processes.items():
-            if process.poll() is None:
-                status[name] = "Running"
-            else:
-                status[name] = f"Stopped (exit code: {process.poll()})"
-
-        # Mark configured but not started
-        configured = MCPServer.from_env()
-        for name in configured:
-            if name not in status:
-                status[name] = "Not Started"
-
-        return status
-
-    def restart_server(self, name: str) -> bool:
-        """Restart a specific server."""
-        logger.info(f"Restarting server: {name}")
-
-        # Stop if running
-        if name in self.processes:
-            process = self.processes[name]
-            try:
-                if process.poll() is None:
-                    process.terminate()
-                    process.wait(timeout=5)
-            except Exception:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-            self.processes.pop(name, None)
-
-        # Start again
-        servers = MCPServer.from_env()
-        if name in servers:
-            return self._start_server_process(name, servers[name])
-
-        logger.error(f"Server '{name}' not found in configuration")
+                    print(f"    Python path exists")
+        
+        return True
+        
+    except json.JSONDecodeError as e:
+        print(f" Invalid MCP_SERVERS JSON: {e}")
         return False
 
+def test_mcp_connection():
+    """Test MCP server connections."""
+    print("\n Testing MCP connections...")
+    
+    try:
+        # Import our modules
+        sys.path.append(str(Path.cwd()))
+        from mcp_connection.manager import MCPServer
+        from mcp_connection.startup import startup_mcp_servers, get_manager
+        
+        # Start servers
+        print("Starting MCP servers...")
+        results = startup_mcp_servers()
+        
+        if not results:
+            print("No servers started")
+            return False
+        
+        success_count = sum(results.values())
+        total_count = len(results)
+        
+        print(f"Server startup results: {success_count}/{total_count} successful")
+        
+        for name, success in results.items():
+            status = "All good!" if success else "Somthing went wrong"
+            print(f"  {status} {name}")
+        
+        if success_count > 0:
+            print("\n Testing a sample MCP call...")
+            try:
+                from tools.mcp_router import route_and_call
+                result = route_and_call("current price of AAPL")
+                if result and not result.startswith("MCP Error:"):
+                    print("MCP routing test successful!")
+                    print(f"Sample result: {result[:100]}...")
+                else:
+                    print(f" MCP test returned: {result}")
+            except Exception as e:
+                print(f" MCP routing test failed: {e}")
+        
+        # Clean up
+        get_manager().stop_all_servers()
+        return success_count > 0
+        
+    except Exception as e:
+        print(f" MCP connection test failed: {e}")
+        return False
 
-# Global manager instance
-_manager: Optional[MCPServerManager] = None
+def run_application():
+    """Run the Streamlit application."""
+    print("\n Starting FinSight application...")
+    
+    try:
+        # Run streamlit
+        subprocess.run([
+            sys.executable, "-m", "streamlit", "run", "app.py",
+            "--server.port=8501",
+            "--server.address=0.0.0.0"
+        ])
+    except KeyboardInterrupt:
+        print("\n Application stopped by user")
+    except Exception as e:
+        print(f" Failed to start application: {e}")
 
+def main():
+    """Main setup and run function."""
+    # Load .env deterministically before anything else
+    load_dotenv(find_dotenv(usecwd=True), override=True)
+    print("🔍 FinSight Setup & Validation")
+    print("=" * 40)
+    
+    # Step 1: Check environment
+    if not check_env_file():
+        print("\n Environment setup incomplete. Please check your .env file.")
+        return
+    
+    # Step 2: Validate MCP configuration  
+    if not validate_mcp_servers():
+        print("\n MCP server configuration invalid. Please check MCP_SERVERS in .env.")
+        return
+    
+    # Step 3: Test MCP connections
+    if not test_mcp_connection():
+        print("\n MCP connection test failed. Application will run with limited functionality.")
+        input("Press Enter to continue anyway, or Ctrl+C to abort...")
+    else:
+        print("\n All systems ready!")
+    
+    # Step 4: Run application
+    print("\n" + "=" * 40)
+    run_application()
 
-def get_manager() -> MCPServerManager:
-    """Get the global server manager instance."""
-    global _manager
-    if _manager is None:
-        _manager = MCPServerManager()
-    return _manager
-
-
-def startup_mcp_servers() -> Dict[str, bool]:
-    """Convenience function to start all MCP servers."""
-    return get_manager().start_all_servers()
-
-
-def shutdown_mcp_servers():
-    """Convenience function to stop all MCP servers."""
-    if _manager:
-        _manager.stop_all_servers()
-
-
-# Cleanup on exit
-import atexit
-atexit.register(shutdown_mcp_servers)
+if __name__ == "__main__":
+    main()
