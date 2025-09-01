@@ -13,7 +13,7 @@ from rag.fusion import fuse
 from mcp_connection.manager import MCPManager, MCPServer
 
 # -----------------------------
-# Constants & heuristics (English only)
+# Constants & heuristics 
 # -----------------------------
 
 # Strict ticker regex: e.g., MSFT, NVDA, GOOGL, BRK.B, XRP-USD
@@ -222,11 +222,9 @@ def _normalize_tool_name(raw: Any) -> Optional[str]:
     return s or None
 
 def _list_server_tools(manager: MCPManager, server: str) -> Dict[str, dict]:
-    # נסה קודם sync wrapper אם קיים
     if hasattr(manager, "list_tools_sync") and callable(getattr(manager, "list_tools_sync")):
         data = manager.list_tools_sync(server)
     else:
-        # ייתכן שהוחזר coroutine – נריץ אותו כמו שצריך
         res = manager.list_tools(server)
         data = asyncio.run(res) if asyncio.iscoroutine(res) else res
 

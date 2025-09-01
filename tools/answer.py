@@ -12,7 +12,7 @@ from tools.tools import (
 )
 from memory.manager import fetch_memory, persist_turn
 from mcp_connection.manager import MCPServer
-from tools.mcp_router import mcp_auto   # משאירים לשילוב MCP
+from tools.mcp_router import mcp_auto   
 
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]|-[A-Z]{1,3})?\b")
 _STOP = {'AND','THE','FOR','WITH','OVER','FROM','THIS','THAT','INTO','YOUR','US','USA','NYSE','NASDAQ','SP','ETF','PE','EV','EBITDA','EPS','CAGR','ROE','P','E'}
@@ -47,7 +47,7 @@ def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]
 
     if should_use and servers:
         try:
-            # הקריאה הזו גם דוחפת את התוכן ל־RAG דרך @fuse
+
             mcp_payload = mcp_auto(query)
             mcp_attempted = True
             mcp_success = True
@@ -106,7 +106,7 @@ def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]
     }
     return {"answer": answer_text, "snippets": snippets, "meta": meta}
 
-# --------- עטיפת כלי שנשארת בשביל האג'נט/פייפליין ---------
+
 @tool(name="answer", description="Fusion RAG + MCP")
 def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     return answer_core(query, ticker, style)
