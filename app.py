@@ -3,10 +3,10 @@ from __future__ import annotations
 import os, json, streamlit as st, dotenv
 dotenv.load_dotenv()
 
-from tools.answer import answer_core          # 👈 ליבה יציבה
+from tools.answer import answer_core          
 from mcp_connection.manager import MCPServer
 from mcp_connection.startup import startup_mcp_servers, get_manager
-from tools.mcp_router import route_and_call   # להציג RAW
+from tools.mcp_router import route_and_call   
 
 st.set_page_config(page_title="FinSight", layout="wide")
 st.title("⚡ FinSight")
@@ -57,7 +57,6 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # הצגת ה-RAW כמו בטרמינל
     try:
         mcp_raw = route_and_call(prompt)
     except Exception as e:
@@ -65,10 +64,9 @@ if prompt:
     with st.expander("🔌 Live MCP (raw)"):
         st.code(mcp_raw, language="json")
 
-    # תשובה יציבה מהליבה
     with st.chat_message("assistant"):
         try:
-            out = answer_core(prompt)              # 👈 קריאה יציבה
+            out = answer_core(prompt)              
             txt = (out or {}).get("answer", "")
             st.markdown(txt if txt else "*No answer text returned*")
             st.session_state["messages"].append({"role": "assistant", "content": txt})
