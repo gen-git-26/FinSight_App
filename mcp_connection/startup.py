@@ -13,7 +13,7 @@ import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 
-from .manager import MCPServerת, MCPManager
+from .manager import MCPServer, MCPManager
 
 logger = logging.getLogger(__name__)
 
