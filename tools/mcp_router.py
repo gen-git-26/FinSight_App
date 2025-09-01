@@ -6,9 +6,9 @@ import math
 import asyncio
 from functools import lru_cache
 from datetime import datetime, date
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
-import yfinance as yf  # validation only
+import yfinance as yf  # used only for validation
 
 from agno.tools import tool
 from rag.fusion import fuse
@@ -71,15 +71,64 @@ KNOWN_TOOLSETS: Dict[str, List[str]] = {
 
 
 # =============================
-# Intent classification
+# Utilities
 # =============================
 
 def _tok(text: str) -> List[str]:
     return re.findall(r"[A-Za-z0-9\.\-]+", text or "")
 
+def _words(s: str) -> List[str]:
+    return re.findall(r"[A-Z0-9]+", (s or "").upper())
+
 def _extract_regex_tickers(text: str) -> List[str]:
     matches = _TICKER_RE.findall((text or "").upper())
     return [m for m in matches if m not in _STOP]
+
+def _is_stop(token: str) -> bool:
+    return token in _STOP
+
+def _looks_like_equity_symbol(token: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z]{1,5}(?:\.[A-Z]{1,3})?", token))
+
+def _is_number(x: Any) -> bool:
+    try:
+        return x is not None and not isinstance(x, bool) and math.isfinite(float(x))
+    except Exception:
+        return False
+
+def _dedupe(seq: List[str]) -> List[str]:
+    seen, out = set(), []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+def _levenshtein(a: str, b: str) -> int:
+    """Damerau-Levenshtein (restricted) distance  – lightweight O(len(a)*len(b))."""
+    a, b = a.upper(), b.upper()
+    la, lb = len(a), len(b)
+    if la == 0: return lb
+    if lb == 0: return la
+    dp = [[0]*(lb+1) for _ in range(la+1)]
+    for i in range(la+1): dp[i][0] = i
+    for j in range(lb+1): dp[0][j] = j
+    for i in range(1, la+1):
+        for j in range(1, lb+1):
+            cost = 0 if a[i-1]==b[j-1] else 1
+            dp[i][j] = min(
+                dp[i-1][j] + 1,
+                dp[i][j-1] + 1,
+                dp[i-1][j-1] + cost
+            )
+            if i>1 and j>1 and a[i-1]==b[j-2] and a[i-2]==b[j-1]:
+                dp[i][j] = min(dp[i][j], dp[i-2][j-2] + 1)
+    return dp[la][lb]
+
+
+# =============================
+# Intent classification
+# =============================
 
 def _detect_crypto_intent(query: str) -> bool:
     up = (query or "").upper()
@@ -106,30 +155,17 @@ def _detect_data_type(query: str) -> str:
 # Symbol validation (robust Yahoo)
 # =============================
 
-def _is_stop(token: str) -> bool:
-    return token in _STOP
-
-def _looks_like_equity_symbol(token: str) -> bool:
-    return bool(re.fullmatch(r"[A-Z]{1,5}(?:\.[A-Z]{1,3})?", token))
-
-def _is_number(x: Any) -> bool:
-    try:
-        return x is not None and not (isinstance(x, bool)) and math.isfinite(float(x))
-    except Exception:
-        return False
-
 @lru_cache(maxsize=1024)
 def _validate_equity_symbol_yahoo(sym: str) -> bool:
     """
     Strong Yahoo validation:
       - Success if 1-day history is non-empty.
-      - Else, success only if fast_info/regularMarketPrice is numeric AND quoteType/market look sane.
-    This avoids false-positives like 'APPL'.
+      - Else, success only if fast_info.last_price OR info.regularMarketPrice is numeric AND quoteType/market plausible.
     """
     try:
         t = yf.Ticker(sym)
 
-        # 1) Try recent history – most reliable
+        # 1) try recent history – most reliable
         try:
             hist = t.history(period="1d", interval="1d", prepost=False)
             if hasattr(hist, "empty") and not hist.empty:
@@ -137,16 +173,18 @@ def _validate_equity_symbol_yahoo(sym: str) -> bool:
         except Exception:
             pass
 
-        # 2) Fallback on fast_info / info with stricter checks
+        # 2) fallback on fast_info or info
         price = None
         try:
-            # fast_info is faster and less error-prone when available
             fi = getattr(t, "fast_info", None)
             if fi and hasattr(fi, "last_price"):
                 price = getattr(fi, "last_price")
         except Exception:
             pass
 
+        quote_type = ""
+        market = ""
+        symbol_echo = ""
         if price is None:
             try:
                 info = t.info or {}
@@ -157,26 +195,19 @@ def _validate_equity_symbol_yahoo(sym: str) -> bool:
             market = (info.get("market") or info.get("fullExchangeName") or "").upper()
             symbol_echo = (info.get("symbol") or "").upper()
 
-            # Require BOTH: numeric price AND plausible quoteType/market,
-            # and symbol echo (if present) should match candidate prefix (avoid random echoes)
-            if _is_number(price) and (quote_type in {"EQUITY", "ETF", "MUTUALFUND", "INDEX", "CRYPTOCURRENCY"} or "NASDAQ" in market or "NYSE" in market):
-                if not symbol_echo or sym.startswith(symbol_echo[:len(sym)]):
-                    return True
-            return False
+        plausible_market = ("NASDAQ" in market) or ("NYSE" in market) or (quote_type in {"EQUITY", "ETF", "MUTUALFUND", "INDEX", "CRYPTOCURRENCY"})
+        if _is_number(price) and plausible_market:
+            if not symbol_echo or sym.startswith(symbol_echo[:len(sym)]):
+                return True
 
-        # fast_info price numeric is good enough
-        return _is_number(price)
-
+        return False
     except Exception:
         return False
 
 
 # =============================
-# Finnhub lookup with better ranking
+# Finnhub lookup with better ranking + typo handling
 # =============================
-
-def _words(s: str) -> List[str]:
-    return re.findall(r"[A-Z0-9]+", (s or "").upper())
 
 def _whole_word_hits(query_words: List[str], text_words: List[str]) -> int:
     tw = set(text_words)
@@ -194,13 +225,11 @@ def _candidate_queries_for_lookup(q: str) -> List[str]:
     if orig:
         cands.append(orig)
 
-    # cleaned
     toks = [t for t in _tok(orig) if t.upper() not in _STOP]
     cleaned = " ".join(toks)
     if cleaned and cleaned != orig:
         cands.append(cleaned)
 
-    # unigrams / bigrams / trigrams
     for t in toks:
         cands.append(t)
     for i in range(len(toks) - 1):
@@ -215,58 +244,69 @@ def _candidate_queries_for_lookup(q: str) -> List[str]:
             out.append(c)
     return out
 
-@lru_cache(maxsize=512)
-def _lookup_equity_symbol_finnhub_one(query: str) -> Optional[str]:
+def _best_symbol_from_finnhub(query: str, prefer_nearby_to: Optional[str] = None) -> Optional[str]:
+    """
+    Query Finnhub symbol_lookup and rank:
+      - Whole-word matches in description
+      - Startswith bonus
+      - Tiny weight for substring
+      - US listing preference
+      - Equity type preference
+      - Shorter symbol slight bonus
+      - Typo tolerance: if 'prefer_nearby_to' is provided (e.g., APPL), boost any candidate
+        whose symbol is Damerau-Levenshtein distance <= 1 from it (so AAPL beats APP).
+    """
     try:
         from utils.config import load_settings
         import finnhub
         settings = load_settings()
         client = finnhub.Client(api_key=settings.finnhub_api_key)
-        res = client.symbol_lookup(query)
-        items = (res or {}).get("result") or []
-        if not items:
-            return None
 
         qw = _words(query)
+        typo_token = prefer_nearby_to.upper() if prefer_nearby_to else None
 
-        def score(it):
-            desc = (it.get("description") or "")
-            ty = (it.get("type") or "")
-            sym = (it.get("symbol") or "")
-            dw = _words(desc)
+        best_sym: Optional[str] = None
+        best_score: float = float("-inf")
 
-            s = 0.0
-            # exact symbol preference if user wrote symbol explicitly
-            if sym.upper() in _words(query):
-                s += 5.0
-            # whole-word matches (avoid 'pineAPPLE')
-            s += 3.0 * _whole_word_hits(qw, dw)
-            # name startswith
-            if dw and qw and " ".join(dw).startswith(" ".join(qw)):
-                s += 1.5
-            # substring matches give tiny weight only
-            s += 0.25 * _substring_hits(query, desc)
-            # prefer US exchanges/types
-            if "NASDAQ" in desc.upper() or "NYSE" in desc.upper():
-                s += 1.0
-            if ty.upper() in {"EQS", "COMMON STOCK", "EQUITY", "STOCK"}:
-                s += 0.5
-            # shorter symbols slightly preferred
-            s += max(0.0, 1.5 - 0.1 * len(sym))
-            return s
+        for cand in _candidate_queries_for_lookup(query):
+            res = client.symbol_lookup(cand)
+            items = (res or {}).get("result") or []
+            for it in items:
+                desc = (it.get("description") or "")
+                ty = (it.get("type") or "")
+                sym = (it.get("symbol") or "").upper().strip()
+                if not sym:
+                    continue
 
-        items.sort(key=score, reverse=True)
-        best = (items[0].get("symbol") or "").upper().strip()
-        return best or None
+                dw = _words(desc)
+                s = 0.0
+                if sym in _words(query):
+                    s += 5.0
+                s += 3.0 * _whole_word_hits(qw, dw)
+                if dw and qw and " ".join(dw).startswith(" ".join(qw)):
+                    s += 1.5
+                s += 0.25 * _substring_hits(query, desc)
+                if "NASDAQ" in desc.upper() or "NYSE" in desc.upper():
+                    s += 1.0
+                if ty.upper() in {"EQS", "COMMON STOCK", "EQUITY", "STOCK"}:
+                    s += 0.5
+                s += max(0.0, 1.5 - 0.1 * len(sym))
+
+                # Typo-friendly boost: if user typed a token that looks like a symbol (e.g., APPL),
+                # prefer symbols within edit distance 1 (AAPL beats APP).
+                if typo_token:
+                    d = _levenshtein(sym, typo_token)
+                    if d == 1:
+                        s += 2.0
+                    elif d == 2:
+                        s += 0.5
+
+                if s > best_score:
+                    best_score, best_sym = s, sym
+
+        return best_sym
     except Exception:
         return None
-
-def _lookup_equity_symbol_finnhub(q: str) -> Optional[str]:
-    for cand in _candidate_queries_for_lookup(q):
-        sym = _lookup_equity_symbol_finnhub_one(cand)
-        if sym and _validate_equity_symbol_yahoo(sym):
-            return sym
-    return None
 
 
 # =============================
@@ -281,14 +321,6 @@ def _maybe_crypto_symbol(token: str) -> Optional[str]:
         return None
     return f"{t}-USD"
 
-def _dedupe(seq: List[str]) -> List[str]:
-    seen, out = set(), []
-    for x in seq:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
-
 
 # =============================
 # Public resolver
@@ -299,10 +331,14 @@ def resolve_tickers(query: str) -> List[str]:
     Robust resolver:
       1) Regex candidates are accepted ONLY if they pass strict Yahoo validation.
       2) If crypto intent, try SYMBOL-USD normalization from a token.
-      3) Otherwise use Finnhub multi-candidate lookup with whole-word ranking, then validate via Yahoo.
+      3) Otherwise use Finnhub multi-candidate lookup with whole-word ranking (+ typo tolerance), then validate via Yahoo.
       4) Return deduped list (possibly empty).
     """
     q_up = (query or "").upper()
+    tokens = [t for t in _tok(query)]
+    # pick a single “symbol-like” token for typo proximity (e.g., APPL)
+    symbolish = next((t.upper() for t in tokens if re.fullmatch(r"[A-Za-z]{3,6}", t)), None)
+
     out: List[str] = []
 
     # 1) regex candidates with strict validation
@@ -317,7 +353,7 @@ def resolve_tickers(query: str) -> List[str]:
     # 2) crypto normalization
     is_crypto = _detect_crypto_intent(query)
     if is_crypto and not any(s.endswith("-USD") for s in out):
-        for w in _tok(query):
+        for w in tokens:
             s = _maybe_crypto_symbol(w)
             if s:
                 out.append(s)
@@ -326,15 +362,15 @@ def resolve_tickers(query: str) -> List[str]:
     if out:
         return _dedupe(out)
 
-    # 3) free-text equity lookup via Finnhub
+    # 3) free-text equity lookup via Finnhub (+ typo-aware)
     if not is_crypto:
-        sym = _lookup_equity_symbol_finnhub(query)
+        sym = _best_symbol_from_finnhub(query, prefer_nearby_to=symbolish)
         if sym and _validate_equity_symbol_yahoo(sym):
             return [sym]
 
     # 4) last crypto attempt
     if is_crypto:
-        for w in _tok(query):
+        for w in tokens:
             s = _maybe_crypto_symbol(w)
             if s:
                 return [s]
@@ -544,8 +580,31 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
 
 
 # =============================
-# Routing
+# Routing + dynamic fallback
 # =============================
+
+def _try_route_once(manager: MCPManager, server: str, tool_name: str, args: dict) -> Tuple[bool, str]:
+    """
+    Returns (success, result_text). Success is True unless we detect a clear failure/empty outcome.
+    """
+    try:
+        res = _call_tool_blocking(manager, server, tool_name, args)
+        text = str(res or "").strip()
+        # Detect common "empty" outcomes from our servers:
+        if not text:
+            return False, text
+        lower = text.lower()
+        if "company ticker" in lower and "not found" in lower:
+            return False, text
+        if "unable to fetch" in lower and "no" in lower and "found" in lower:
+            return False, text
+        if "no news found" in lower:
+            return False, text
+        if "error:" in lower and "invalid" in lower:
+            return False, text
+        return True, text
+    except Exception as e:
+        return False, f"Tool error: {e}"
 
 def route_and_call(query: str) -> str:
     try:
@@ -557,44 +616,85 @@ def route_and_call(query: str) -> str:
         data_type = _detect_data_type(query)
         is_crypto = _detect_crypto_intent(query)
 
-        server = _select_best_server(query, available_servers)
-        if not server:
+        primary_server = _select_best_server(query, available_servers)
+        if not primary_server:
             return "No suitable MCP server found"
 
         manager = MCPManager()
-
-        tools_map = _list_server_tools(manager, server)
+        tools_map = _list_server_tools(manager, primary_server)
         tool_names = list(tools_map.keys())
         if not tool_names:
-            return f"No tools exposed by server '{server}'"
+            return f"No tools exposed by server '{primary_server}'"
 
-        tool_name = _choose_tool_from_available(server, query, data_type, tool_names)
+        tool_name = _choose_tool_from_available(primary_server, query, data_type, tool_names)
         if not tool_name:
-            return f"No matching tool found on server '{server}'"
+            return f"No matching tool found on server '{primary_server}'"
 
         tool_obj = tools_map.get(tool_name, {"name": tool_name})
-        args = _build_args_from_schema(manager, server, tool_obj, query, tickers)
+        args = _build_args_from_schema(manager, primary_server, tool_obj, query, tickers)
 
+        # If the tool needs a ticker/symbol and none resolved → last-attempt lookup with typo help
         schema = tool_obj.get("inputSchema") or {}
         props = (schema.get("properties") if isinstance(schema, dict) else {}) or {}
         required = (schema.get("required") if isinstance(schema, dict) else []) or []
         needs_symbol = ("ticker" in props or "symbol" in props) or any(r in ("ticker", "symbol") for r in required)
 
         if needs_symbol and not (args.get("ticker") or args.get("symbol")):
-            # last-attempt lookup
-            sym = _lookup_equity_symbol_finnhub(query)
+            tokens = [t for t in _tok(query)]
+            symbolish = next((t.upper() for t in tokens if re.fullmatch(r"[A-Za-z]{3,6}", t)), None)
+            sym = _best_symbol_from_finnhub(query, prefer_nearby_to=symbolish)
             if sym and _validate_equity_symbol_yahoo(sym):
                 args["ticker"] = sym
             else:
                 return "Could not resolve a valid ticker from the query. Please specify a symbol (e.g., TSLA or AAPL)."
 
         routing_info = (
-            f"Route: {server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | "
+            f"Route: {primary_server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | "
             f"Tickers: {args.get('ticker') or args.get('symbol') or tickers}"
         )
 
-        result = _call_tool_blocking(manager, server, tool_name, args)
-        return f"{routing_info}\n\n{result}"
+        # First attempt
+        ok, out = _try_route_once(manager, primary_server, tool_name, args)
+        if ok:
+            return f"{routing_info}\n\n{out}"
+
+        # Dynamic fallback: try an alternative server/tool if available and relevant
+        fallback_attempts: List[Tuple[str, str]] = []
+
+        # If original was yfinance + news, try financial-datasets company news
+        if primary_server == "yfinance" and "news" in tool_name and "financial-datasets" in available_servers and "get_company_news" in _list_server_tools(manager, "financial-datasets"):
+            fallback_attempts.append(("financial-datasets", "get_company_news"))
+
+        # If original was yfinance info/price and failed, try financial-datasets quote
+        if primary_server == "yfinance" and any(k in tool_name for k in ["get_stock_info", "get_historical_stock_prices"]) and "financial-datasets" in available_servers:
+            alt = "get_current_crypto_price" if is_crypto else "get_current_stock_price"
+            tools_fd = _list_server_tools(manager, "financial-datasets")
+            if alt in tools_fd:
+                fallback_attempts.append(("financial-datasets", alt))
+
+        # If primary was financial-datasets and failed for equity, try yfinance
+        if primary_server == "financial-datasets" and "yfinance" in available_servers:
+            tools_yf = _list_server_tools(manager, "yfinance")
+            if "news" in tool_name and "get_yahoo_finance_news" in tools_yf:
+                fallback_attempts.append(("yfinance", "get_yahoo_finance_news"))
+            if "get_current_stock_price" in tool_name and "get_stock_info" in tools_yf:
+                fallback_attempts.append(("yfinance", "get_stock_info"))
+
+        # Execute fallbacks (first success returns)
+        for srv, tname in fallback_attempts:
+            alt_tools = _list_server_tools(manager, srv)
+            if tname not in alt_tools:
+                continue
+            alt_obj = alt_tools.get(tname, {"name": tname})
+            alt_args = _build_args_from_schema(manager, srv, alt_obj, query, tickers)
+            if needs_symbol and not (alt_args.get("ticker") or alt_args.get("symbol")):
+                alt_args["ticker"] = args.get("ticker") or args.get("symbol")
+            ok2, out2 = _try_route_once(manager, srv, tname, alt_args)
+            if ok2:
+                return f"{routing_info} → Fallback: {srv}/{tname}\n\n{out2}"
+
+        # If we got here — no fallback succeeded
+        return f"{routing_info}\n\n{out}"
 
     except Exception as e:
         return f"MCP routing failed: {str(e)}"
