@@ -1,187 +1,234 @@
 # mcp_connection/startup.py
-"""
-MCP Server Startup Manager
-Automatically starts and manages MCP servers when the application loads.
-"""
+from __future__ import annotations
 
+import asyncio
+import json
 import os
-import sys
-import subprocess
-import threading
-import time
-import logging
-from typing import Dict, List, Optional
+import shlex
 from pathlib import Path
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-from .manager import MCPServer, MCPManager
+from mcp.client.session import ClientSession
+from mcp.client.stdio import stdio_client, StdioServerParameters
 
-logger = logging.getLogger(__name__)
 
-class MCPServerManager:
-    """Manages the lifecycle of MCP servers."""
-    
-    def __init__(self):
-        self.processes: Dict[str, subprocess.Popen] = {}
-        self.startup_threads: Dict[str, threading.Thread] = {}
-        self.startup_timeout = 30  # seconds
-        
-    def _start_server_process(self, name: str, server: MCPServer) -> bool:
-        """Start a single MCP server process."""
+@dataclass
+class MCPServer:
+    name: str
+    command: str
+    args: List[str]
+    env: Optional[Dict[str, str]] = None
+    cwd: Optional[str] = None
+
+    @staticmethod
+    def from_env() -> Dict[str, "MCPServer"]:
+        """
+        Load servers from MCP_SERVERS (JSON).
+
+        Supported examples:
+        1) With args:
+           [{"name":"yfinance",
+             "command":"/path/to/python",
+             "args":["-u","/abs/path/vendors/yahoo-finance-mcp/server.py"],
+             "env":{"PYTHONUNBUFFERED":"1"},
+             "cwd":"/abs/path/vendors/yahoo-finance-mcp"}]
+
+        2) Single string command (auto-split):
+           [{"name":"financial-datasets",
+             "command":"/path/to/python -u /abs/path/vendors/financial-datasets-mcp/server.py"}]
+        """
+        raw = os.getenv("MCP_SERVERS", "").strip()
+        if not raw:
+            return {}
+
         try:
-            logger.info(f"Starting MCP server: {name}")
-            
-            # Prepare command
-            if isinstance(server.command, list):
-                cmd = server.command
+            items = json.loads(raw)
+        except Exception:
+            items = []
+
+        servers: Dict[str, MCPServer] = {}
+        for it in items or []:
+            name = str(it.get("name") or "").strip()
+            if not name:
+                continue
+
+            cmd_raw = it.get("command") or ""
+            args: Optional[List[str]] = it.get("args")
+            cwd = it.get("cwd") or None
+            env = dict(it.get("env") or {})
+
+            # Ensure unbuffered python output unless explicitly set
+            env.setdefault("PYTHONUNBUFFERED", "1")
+
+            # Normalize command and args
+            if isinstance(cmd_raw, str):
+                if (args is None or not isinstance(args, list)) and cmd_raw.strip():
+                    parts = shlex.split(cmd_raw)
+                    command = parts[0] if parts else ""
+                    args = parts[1:] if len(parts) > 1 else []
+                else:
+                    command = cmd_raw
+                    if args is None:
+                        args = []
+            elif isinstance(cmd_raw, list):
+                # Rare case where command is already a vector
+                parts = [str(p) for p in cmd_raw if str(p).strip()]
+                command = parts[0] if parts else ""
+                if args is None:
+                    args = parts[1:]
             else:
-                cmd = server.command.split()
-            
-            # Prepare environment (inherit + overlay) and cwd consistently with MCPManager
-            env = MCPManager.build_child_env(server.env)
-            cwd = MCPManager.resolve_cwd(server.cwd)
-            
-            # Start process
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-                cwd=cwd
+                command = str(cmd_raw)
+                if args is None:
+                    args = []
+
+            if not command:
+                continue
+
+            servers[name] = MCPServer(
+                name=name,
+                command=command,
+                args=args,
+                env=env or None,
+                cwd=cwd,
             )
-            
-            self.processes[name] = process
-            logger.info(f"MCP server '{name}' started with PID {process.pid}")
-            
-            # Monitor process health
-            def monitor():
-                time.sleep(2)  # Give it time to start
-                if process.poll() is not None:
-                    # Process died
-                    stdout, stderr = process.communicate()
-                    logger.error(f"MCP server '{name}' failed to start")
-                    logger.error(f"STDOUT: {stdout}")
-                    logger.error(f"STDERR: {stderr}")
+
+        return servers
+
+
+class MCPManager:
+    def __init__(self, servers: Optional[Dict[str, MCPServer]] = None) -> None:
+        self.servers = servers or MCPServer.from_env()
+
+    # -------- Shared helpers (ENV/CWD) --------
+    @staticmethod
+    def build_child_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """
+        Inherit full process environment and overlay any server-specific variables.
+        No hard-coded keys here.
+        """
+        env = os.environ.copy()
+        if extra:
+            env.update({k: v for k, v in extra.items() if v is not None})
+        return env
+
+    @staticmethod
+    def resolve_cwd(explicit: Optional[str]) -> str:
+        """
+        Use explicit cwd if provided, otherwise default to the current project directory.
+        """
+        return explicit or str(Path.cwd())
+
+    # -------- Factories --------
+    @classmethod
+    def from_env(cls) -> Dict[str, MCPServer]:
+        return MCPServer.from_env()
+
+    # -------- MCP Calls --------
+    async def call(self, server_name: str, tool: str, arguments: Dict[str, Any]) -> str:
+        if server_name not in self.servers:
+            raise ValueError(
+                f"Unknown MCP server '{server_name}'. Known: {', '.join(self.servers) or 'none'}"
+            )
+
+        srv = self.servers[server_name]
+
+        params = StdioServerParameters(
+            command=srv.command,
+            args=srv.args or [],
+            env=self.build_child_env(srv.env),
+            cwd=self.resolve_cwd(srv.cwd),
+        )
+
+        # Debug spawn line
+        print(
+            "[MCP spawn]",
+            params.command,
+            params.args,
+            params.cwd,
+            {k: v for k, v in (params.env or {}).items()
+             if k in ("PYTHONUNBUFFERED", "FINANCIAL_DATASETS_API_KEY", "OPENAI_API_KEY")}
+        )
+
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool, arguments)
+
+                # Flatten result to text or JSON
+                parts: List[str] = []
+                content = getattr(result, "content", None) or []
+                for c in content:
+                    t = getattr(c, "text", None) or (c.get("text") if isinstance(c, dict) else None)
+                    if t:
+                        parts.append(t)
+                        continue
+                    j = getattr(c, "json", None) or (c.get("json") if isinstance(c, dict) else None)
+                    if j is not None:
+                        parts.append(json.dumps(j, ensure_ascii=False))
+                        continue
+                    parts.append(str(c))
+                return "\n".join(parts) if parts else (json.dumps(result, ensure_ascii=False) if result else "")
+
+    @staticmethod
+    def call_sync(server_name: str, tool: str, arguments: Dict[str, Any]) -> str:
+        mgr = MCPManager()
+        return asyncio.run(mgr.call(server_name, tool, arguments))
+
+    # ---------- Official ListTools over the MCP protocol ----------
+    async def list_tools(self, server_name: str) -> Dict[str, Any]:
+        if server_name not in self.servers:
+            raise ValueError(
+                f"Unknown MCP server '{server_name}'. Known: {', '.join(self.servers) or 'none'}"
+            )
+
+        srv = self.servers[server_name]
+
+        params = StdioServerParameters(
+            command=srv.command,
+            args=srv.args or [],
+            env=self.build_child_env(srv.env),
+            cwd=self.resolve_cwd(srv.cwd),
+        )
+
+        # Debug spawn line for list tools
+        print(
+            "[MCP spawn list_tools]",
+            params.command,
+            params.args,
+            params.cwd,
+            {k: v for k, v in (params.env or {}).items()
+             if k in ("PYTHONUNBUFFERED", "FINANCIAL_DATASETS_API_KEY", "OPENAI_API_KEY")}
+        )
+
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                init = await session.initialize()
+
+                try:
+                    listed = await session.list_tools()
+                except Exception:
+                    listed = init
+
+                # Normalize to {"tools": [...]}
+                if hasattr(listed, "tools"):
+                    items = getattr(listed, "tools") or []
+                elif isinstance(listed, dict) and "tools" in listed:
+                    items = listed.get("tools") or []
                 else:
-                    logger.info(f"MCP server '{name}' is healthy")
-            
-            threading.Thread(target=monitor, daemon=True).start()
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to start MCP server '{name}': {e}")
-            return False
-    
-    def start_all_servers(self) -> Dict[str, bool]:
-        """Start all configured MCP servers."""
-        servers = MCPServer.from_env()
-        results = {}
-        
-        if not servers:
-            logger.warning("No MCP servers configured in environment")
-            return results
-        
-        logger.info(f"Starting {len(servers)} MCP servers...")
-        
-        for name, server in servers.items():
-            success = self._start_server_process(name, server)
-            results[name] = success
-            
-            if success:
-                logger.info(f"Server '{name}' startup initiated")
-            else:
-                logger.error(f"Server '{name}' startup failed")
-        
-        # Wait a moment for all servers to initialize
-        time.sleep(3)
-        
-        return results
-    
-    def stop_all_servers(self):
-        """Stop all running MCP servers."""
-        logger.info("Stopping all MCP servers...")
-        
-        for name, process in self.processes.items():
-            try:
-                if process.poll() is None:  # Still running
-                    logger.info(f"Stopping server: {name}")
-                    process.terminate()
-                    
-                    # Wait for graceful shutdown
-                    try:
-                        process.wait(timeout=5)
-                        logger.info(f"Server '{name}' stopped gracefully")
-                    except subprocess.TimeoutExpired:
-                        logger.warning(f"Force killing server: {name}")
-                        process.kill()
-                        process.wait()
-                        logger.info(f"Server '{name}' force stopped")
-                else:
-                    logger.info(f"Server '{name}' already stopped")
-                    
-            except Exception as e:
-                logger.error(f"Error stopping server '{name}': {e}")
-        
-        self.processes.clear()
-        logger.info("All MCP servers stopped")
-    
-    def get_server_status(self) -> Dict[str, str]:
-        """Get the status of all servers."""
-        status = {}
-        
-        for name, process in self.processes.items():
-            if process.poll() is None:
-                status[name] = "Running"
-            else:
-                status[name] = f"Stopped (exit code: {process.poll()})"
-        
-        # Check for configured but not started servers
-        configured = MCPServer.from_env()
-        for name in configured:
-            if name not in status:
-                status[name] = "Not Started"
-        
-        return status
-    
-    def restart_server(self, name: str) -> bool:
-        """Restart a specific server."""
-        logger.info(f"Restarting server: {name}")
-        
-        # Stop if running
-        if name in self.processes:
-            process = self.processes[name]
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=5)
-            del self.processes[name]
-        
-        # Start again
-        servers = MCPServer.from_env()
-        if name in servers:
-            return self._start_server_process(name, servers[name])
-        else:
-            logger.error(f"Server '{name}' not found in configuration")
-            return False
+                    items = listed if isinstance(listed, list) else []
 
-# Global manager instance
-_manager: Optional[MCPServerManager] = None
+                tools_list: List[Dict[str, Any]] = []
+                for t in items:
+                    if hasattr(t, "model_dump"):
+                        tools_list.append(t.model_dump())
+                    elif isinstance(t, dict):
+                        tools_list.append(t)
+                    else:
+                        # Fallback to string repr if needed
+                        tools_list.append({"name": str(t)})
 
-def get_manager() -> MCPServerManager:
-    """Get the global server manager instance."""
-    global _manager
-    if _manager is None:
-        _manager = MCPServerManager()
-    return _manager
+                return {"tools": tools_list}
 
-def startup_mcp_servers() -> Dict[str, bool]:
-    """Convenience function to start all MCP servers."""
-    return get_manager().start_all_servers()
-
-def shutdown_mcp_servers():
-    """Convenience function to stop all MCP servers."""
-    if _manager:
-        _manager.stop_all_servers()
-
-# Cleanup on exit
-import atexit
-atexit.register(shutdown_mcp_servers)
+    def list_tools_sync(self, server_name: str) -> Dict[str, Any]:
+        return asyncio.run(self.list_tools(server_name))
