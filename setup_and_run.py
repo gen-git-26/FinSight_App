@@ -15,7 +15,7 @@ import logging
 from typing import Dict, Optional
 from pathlib import Path
 
-from .manager import MCPServer, MCPManager
+from mcp_connection.manager import MCPServer, MCPManager
 
 logger = logging.getLogger(__name__)
 
