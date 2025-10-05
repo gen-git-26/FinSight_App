@@ -133,7 +133,6 @@ def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]
             except Exception:
                 pass
 
-    # 3) Build retrieval filters (safe)
     flt: List[rest.FieldCondition] = []
     if tickers:
         try:
