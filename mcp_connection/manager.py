@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 import shlex
-from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -94,26 +93,6 @@ class MCPManager:
     def __init__(self, servers: Optional[Dict[str, MCPServer]] = None) -> None:
         self.servers = servers or MCPServer.from_env()
 
-    # -------- Shared helpers (ENV/CWD) --------
-    @staticmethod
-    def build_child_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-        """
-        Inherit full process environment and overlay any server-specific variables.
-        No hard-coded keys here.
-        """
-        env = os.environ.copy()
-        if extra:
-            env.update({k: v for k, v in extra.items() if v is not None})
-        return env
-
-    @staticmethod
-    def resolve_cwd(explicit: Optional[str]) -> str:
-        """
-        Use explicit cwd if provided, otherwise default to the current project directory.
-        """
-        return explicit or str(Path.cwd())
-
-    # -------- MCP Calls --------
     @classmethod
     def from_env(cls) -> Dict[str, MCPServer]:
         return MCPServer.from_env()
@@ -129,10 +108,10 @@ class MCPManager:
         params = StdioServerParameters(
             command=srv.command,
             args=srv.args or [],
-            env=self.build_child_env(srv.env),
-            cwd=self.resolve_cwd(srv.cwd),
+            env=srv.env or {},
+            cwd=srv.cwd,
         )
-        
+
         # Debug spawn line
         print(
             "[MCP spawn]",
@@ -176,12 +155,11 @@ class MCPManager:
             )
 
         srv = self.servers[server_name]
-
         params = StdioServerParameters(
             command=srv.command,
             args=srv.args or [],
-            env=self.build_child_env(srv.env),
-            cwd=self.resolve_cwd(srv.cwd),
+            env=srv.env or {},
+            cwd=srv.cwd,
         )
 
         # Debug spawn line for list tools

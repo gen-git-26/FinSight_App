@@ -1,143 +1,246 @@
 # rag/qdrant_client.py
 from __future__ import annotations
 
-import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
+import uuid
 
-import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 
-log = logging.getLogger(__name__)
+from utils.config import load_settings
 
-# If your project exposes a config loader – great. Otherwise fallback to envs.
-try:
-    from utils.config import load_settings
-except Exception:
-    load_settings = None
 
-def _get_cfg():
-    if load_settings:
+
+def _rrf(lists: List[List[rest.ScoredPoint]], k: int = 60) -> List[rest.ScoredPoint]:
+    scores: Dict[str, float] = {}
+    pick: Dict[str, rest.ScoredPoint] = {}
+    for lst in lists:
+        for rank, p in enumerate(lst, start=1):
+            pid = str(p.id)
+            pick[pid] = p
+            scores[pid] = scores.get(pid, 0.0) + 1.0 / (k + rank)
+    order = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    return [pick[pid] for pid, _ in order]
+
+
+
+def _as_point_id(value: Any) -> Union[int, str]:
+    """
+    Accepts int, numeric-string, UUID-string, or arbitrary string.
+    - int / "123" -> int
+    - valid UUID string -> same string
+    - any other string -> deterministic UUIDv5 derived from the string
+    """
+    if isinstance(value, int):
+        return value
+
+    s = "" if value is None else str(value)
+
+    # numeric string -> int
+    if s.isdigit():
         try:
-            return load_settings()
+            return int(s)
         except Exception:
             pass
-    import os
-    class Cfg:
-        qdrant_url = os.getenv("QDRANT_URL", "")
-        qdrant_api_key = os.getenv("QDRANT_API_KEY", "")
-        qdrant_collection = os.getenv("QDRANT_COLLECTION", "finsight")
-    return Cfg()
+
+    # valid UUID string -> return normalized
+    try:
+        u = uuid.UUID(s)
+        return str(u)
+    except Exception:
+        pass
+
+    # fallback: deterministic UUIDv5 from the string
+    base = s if s else "empty-id"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, base))
+
 
 class HybridQdrant:
-    """
-    A resilient, hybrid (dense+sparse) Qdrant wrapper.
-    If Qdrant is unreachable or misconfigured, methods return empty results instead of raising.
-    """
     def __init__(self) -> None:
-        cfg = _get_cfg()
-        self.collection = cfg.qdrant_collection or "finsight"
+        cfg = load_settings()
+        self.client = QdrantClient(url=cfg.qdrant_url, api_key=cfg.qdrant_api_key)
+        self.collection = cfg.qdrant_collection
         self._ensured = False
-        self._client: Optional[QdrantClient] = None
 
-        try:
-            # Avoid version check that may 404 behind certain proxies
-            self._client = QdrantClient(
-                url=cfg.qdrant_url,
-                api_key=cfg.qdrant_api_key or None,
-                timeout=10.0,
-                prefer_grpc=False,
-                # important: do not try to verify compatibility on init
-                # newer qdrant_client does this lazily; if your version supports, pass check_compatibility=False
-            )
-            # lightweight ping: get collections as a health check
-            _ = self._client.get_collections()
-            log.info("Qdrant connected.")
-        except Exception as e:
-            log.warning("Qdrant unavailable (%s). Running without vector store.", e)
-            self._client = None
-
-    @property
-    def client(self) -> Optional[QdrantClient]:
-        return self._client
-
+    
     def ensure_collections(self, dense_dim: Optional[int] = None) -> None:
         """
-        Create/ensure a collection with a dense vector 'text' and sparse 'bm25'.
-        No-ops if client is None.
+        יוצר/מוודא קולקציה עם וקטור צפוף 'text' וספראז 'bm25' ואינדקסי payload.
+        רצה פעם אחת לכל מופע.
         """
-        if self._ensured or self._client is None:
+        if self._ensured:
             return
-        try:
-            exists = False
-            cols = self._client.get_collections()
-            for c in (cols.collections or []):
-                if getattr(c, "name", "") == self.collection:
-                    exists = True
-                    break
 
-            if not exists:
-                vectors_config = rest.VectorParams(
-                    size=int(dense_dim or 1024),  # safe default; real dim is set by your embedder
-                    distance=rest.Distance.COSINE,
-                )
-                self._client.create_collection(
-                    collection_name=self.collection,
-                    vectors_config={"text": vectors_config},
-                    sparse_vectors_config={
-                        "bm25": rest.SparseVectorParams(index=rest.SparseIndexParams())
-                    },
-                    optimizers_config=rest.OptimizersConfigDiff(indexing_threshold=10000),
-                )
-                # optional payload indexes
+        colls = [c.name for c in self.client.get_collections().collections]
+        if self.collection in colls:
+           
+            for field, schema in [
+                ("symbol", rest.PayloadSchemaType.KEYWORD),
+                ("type", rest.PayloadSchemaType.KEYWORD),
+                ("date", rest.PayloadSchemaType.TEXT),
+                ("user", rest.PayloadSchemaType.KEYWORD),
+            ]:
                 try:
-                    self._client.create_payload_index(self.collection, field_name="type", field_schema=rest.PayloadSchemaType.KEYWORD)
+                    self.client.create_payload_index(
+                        self.collection, field_name=field, field_schema=schema
+                    )
                 except Exception:
-                    pass
-                try:
-                    self._client.create_payload_index(self.collection, field_name="symbol", field_schema=rest.PayloadSchemaType.KEYWORD)
-                except Exception:
+                
                     pass
             self._ensured = True
-        except Exception as e:
-            log.warning("ensure_collections failed; continuing without vector store. err=%s", e)
+            return
 
+       
+        if dense_dim is None:
+          
+            dense_dim = 3072
+
+        self.client.recreate_collection(
+            collection_name=self.collection,
+            vectors_config={
+                "text": rest.VectorParams(size=dense_dim, distance=rest.Distance.COSINE),
+            },
+            sparse_vectors_config={
+                "bm25": rest.SparseVectorParams(),
+            },
+        )
+
+        # Create payload indices for common fields
+        for field, schema in [
+            ("symbol", rest.PayloadSchemaType.KEYWORD),
+            ("type", rest.PayloadSchemaType.KEYWORD),
+            ("date", rest.PayloadSchemaType.TEXT),
+            ("user", rest.PayloadSchemaType.KEYWORD),
+        ]:
+            try:
+                self.client.create_payload_index(
+                    self.collection, field_name=field, field_schema=schema
+                )
+            except Exception:
+                pass
+
+        self._ensured = True
+
+    # --------- Upsert ---------
+    async def upsert_snippets(self, items: List[Dict[str, Any]]) -> None:
+        from rag.embeddings import embed_texts, sparse_from_text  
+
+        self.ensure_collections()
+
+        texts = [str(it.get("text", "")) for it in items]
+        dense_vecs = await embed_texts(texts)
+
+        points: List[rest.PointStruct] = []
+        for i, it in enumerate(items):
+            raw_id = it.get("id") or f"snip-{i}"
+            pid = _as_point_id(raw_id)  
+            payload = {
+                "text": texts[i],
+                "symbol": it.get("symbol", ""),
+                "type": it.get("type", ""),
+                "date": it.get("date", ""),
+                "source": it.get("source", ""),
+                "slug": it.get("slug", ""),
+                "user": it.get("user", ""),
+            }
+            points.append(
+                rest.PointStruct(
+                    id=pid,
+                    vector={
+                        "text": dense_vecs[i],
+                        "bm25": sparse_from_text(texts[i]),
+                    },
+                    payload=payload,
+                )
+            )
+
+        # אפשר להוסיף wait=True אם רוצים לחכות לכתיבה:
+        self.client.upsert(collection_name=self.collection, points=points)
+
+    # --------- Filters helper ---------
+    def mk_filters(
+        self,
+        date_gte: Optional[str] = None,
+        symbol_in: Optional[List[str]] = None,
+        type_in: Optional[List[str]] = None,
+        user_in: Optional[List[str]] = None,
+    ) -> Optional[rest.Filter]:
+        must: List[rest.FieldCondition] = []
+
+        if date_gte:
+            must.append(rest.FieldCondition(key="date", range=rest.Range(gte=date_gte)))
+
+        if symbol_in:
+            vals = [s for s in symbol_in if s]
+            if vals:
+                must.append(rest.FieldCondition(key="symbol", match=rest.MatchAny(any=vals)))
+
+        if type_in:
+            vals = [t for t in type_in if t]
+            if vals:
+                must.append(rest.FieldCondition(key="type", match=rest.MatchAny(any=vals)))
+
+        if user_in:
+            vals = [u for u in user_in if u]
+            if vals:
+                must.append(rest.FieldCondition(key="user", match=rest.MatchAny(any=vals)))
+
+        return rest.Filter(must=must) if must else None  # type: ignore[return-value]
+
+    # --------- Hybrid search + RRF ---------
     def hybrid_search(
         self,
+        *,
         dense: List[float],
-        sparse: Dict[int, float],
-        limit: int = 24,
+        sparse: rest.SparseVector,
+        limit: int = 12,
         must: Optional[List[rest.FieldCondition]] = None,
         should: Optional[List[rest.FieldCondition]] = None,
     ) -> List[rest.ScoredPoint]:
         """
-        Perform a hybrid (dense+sparse) search. Returns [] if client is None or on error.
+        מריץ חיפוש צפוף וחיפוש BM25 בנפרד, מאחה בעזרת RRF,
+        ותומך בשני מצבי פילטר: MUST ו-SHOULD (לריכוך).
         """
-        if self._client is None:
-            return []
-        try:
-            # sparse vector wrapper
-            sv = rest.SparseVector(indices=list(sparse.keys()), values=list(sparse.values())) if sparse else None
+        self.ensure_collections()
 
-            # filter
-            f = None
-            if must or should:
-                f = rest.Filter(must=must or [], should=should or [])
+        flt_must = rest.Filter(must=must) if must else None
+        flt_should = rest.Filter(should=should) if should else None
 
-            # hybrid query
-            res = self._client.query_points(
-                collection_name=self.collection,
-                query=rest.Query(
-                    vector=rest.NamedVector(
-                        name="text", vector=dense
-                    ),
-                    sparse_vector=sv,
-                ),
-                filter=f,
-                limit=limit,
-                with_payload=True,
-            )
-            return res.points or []
-        except Exception as e:
-            log.warning("hybrid_search failed; returning empty. err=%s", e)
-            return []
+        # Pass 1: MUST
+        res_dense_must = self.client.search(
+            collection_name=self.collection,
+            query_vector=("text", dense),
+            query_filter=flt_must,
+            limit=limit,
+            with_payload=True,
+        )
+        res_sparse_must = self.client.search(
+            collection_name=self.collection,
+            query_vector=rest.NamedSparseVector(name="bm25", vector=sparse),
+            query_filter=flt_must,
+            limit=limit,
+            with_payload=True,
+        )
+        fused_must = _rrf([res_dense_must, res_sparse_must])
+
+        if flt_should is None:
+            return fused_must[:limit]
+
+        # Pass 2: SHOULD
+        res_dense_should = self.client.search(
+            collection_name=self.collection,
+            query_vector=("text", dense),
+            query_filter=flt_should,
+            limit=limit,
+            with_payload=True,
+        )
+        res_sparse_should = self.client.search(
+            collection_name=self.collection,
+            query_vector=rest.NamedSparseVector(name="bm25", vector=sparse),
+            query_filter=flt_should,
+            limit=limit,
+            with_payload=True,
+        )
+        fused_should = _rrf([res_dense_should, res_sparse_should])
+        # Final fusion of MUST and SHOULD
+        return _rrf([fused_must, fused_should])[:limit]
