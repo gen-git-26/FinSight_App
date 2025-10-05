@@ -1,9 +1,21 @@
 # utils/config.py
 # This file is used to load configuration settings for the application.
 import os
-from dataclasses import dataclass
-from typing import List
+from pathlib import Path
+
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+_ENV_LOADED = False
+
+
+def _ensure_env_loaded() -> None:
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    load_dotenv(env_path, override=False)
+    _ENV_LOADED = True
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -38,6 +50,7 @@ class Settings(BaseModel):
 
 
 def load_settings() -> Settings:
+    _ensure_env_loaded()
     return Settings(
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
