@@ -84,7 +84,9 @@ class HybridQdrant:
                 self._client.create_collection(
                     collection_name=self.collection,
                     vectors_config={"text": vectors_config},
-                    sparse_vectors_config={"bm25": rest.SparseVectorParams(indexed=True)},
+                    sparse_vectors_config={
+                        "bm25": rest.SparseVectorParams(index=rest.SparseIndexParams())
+                    },
                     optimizers_config=rest.OptimizersConfigDiff(indexing_threshold=10000),
                 )
                 # optional payload indexes

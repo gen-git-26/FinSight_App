@@ -1,10 +1,8 @@
 # rag/fusion.py
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, Dict, List, Tuple
-from functools import wraps
 import numpy as np
 
 from qdrant_client.http import models as rest
@@ -40,14 +38,7 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
         return 0.0
     return float(np.dot(a, b) / (na * nb))
 
-def _asyncify(fn):
-    @wraps(fn)
-    async def wrap(*a, **k):
-        return fn(*a, **k)
-    return wrap
-
-@_asyncify
-def retrieve(
+async def retrieve(
     query: str,
     filters: List[rest.FieldCondition] | None = None,
     k: int = 24
@@ -64,8 +55,12 @@ def retrieve(
         return []
 
     try:
-        sparse = sparse_from_text(query) or {}
-        dense = asyncio.run(embed_texts([query]))[0]  # embed_texts is async
+        sparse_vec = sparse_from_text(query)
+        if isinstance(sparse_vec, rest.SparseVector):
+            sparse = dict(zip(sparse_vec.indices or [], sparse_vec.values or []))
+        else:
+            sparse = sparse_vec or {}
+        dense = (await embed_texts([query]))[0]
     except Exception as e:
         log.warning("Embeddings failed; retrieve will return empty. err=%s", e)
         return []
@@ -91,8 +86,7 @@ def retrieve(
         log.warning("retrieve hybrid failed; returning empty. err=%s", e)
         return []
 
-@_asyncify
-def rerank_and_summarize(
+async def rerank_and_summarize(
     query: str,
     docs: List[Dict[str, Any]],
     style: str = "concise",
@@ -109,8 +103,8 @@ def rerank_and_summarize(
     try:
         texts = [str(d.get("text", ""))[:2000] for d in docs[:max(4, min(10, len(docs)))]]
         # simple cosine rerank
-        q_emb = asyncio.run(embed_texts([query]))[0]
-        d_embs = asyncio.run(embed_texts(texts))
+        q_emb = (await embed_texts([query]))[0]
+        d_embs = await embed_texts(texts)
         q = np.array(q_emb)
         order = sorted(range(len(d_embs)), key=lambda i: _cosine(q, np.array(d_embs[i])), reverse=True)
 
