@@ -5,13 +5,11 @@ from typing import Dict, Any, List
 from agno.tools import tool
 from qdrant_client.http import models as rest
 
-# Optional, only if configured in your project:
 try:
     from utils.config import load_settings
 except Exception:
     load_settings = None
 
-# Your existing non-MCP data sources (keep imports if you have them)
 try:
     from tools.tools import (
         finnhub_stock_info,
@@ -21,14 +19,13 @@ try:
         finnhub_financials_new,
     )
 except Exception:
-    # make them optional; answer_core must never crash if these are missing
     def finnhub_stock_info(*a, **k): return None
     def finnhub_basic_financials(*a, **k): return None
     def finnhub_financials_as_reported(*a, **k): return None
     def company_overview(*a, **k): return None
     def finnhub_financials_new(*a, **k): return None
 
-# RAG layer (safe)
+# RAG layer 
 try:
     from rag.fusion import retrieve, rerank_and_summarize
 except Exception:
@@ -174,7 +171,7 @@ def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]
     else:
         answer_text, snippets = _safe_rerank_summarize(query, docs, style, extra_context, max_tok)
 
-    # 7) Persist memory (optional)
+    # 7) Persist memory (turn-level)
     try:
         from memory.manager import fetch_memory, persist_turn
         mem_ctx = asyncio.run(fetch_memory(query=query, k=3))
