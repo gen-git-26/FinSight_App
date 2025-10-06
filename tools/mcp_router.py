@@ -52,10 +52,16 @@ KNOWN_TOOLSETS: Dict[str, List[str]] = {
         "get_recommendations",
     ],
     "financial-datasets": [
+        "get_income_statements",
+        "get_balance_sheets",
+        "get_cash_flow_statements",
         "get_current_stock_price",
         "get_historical_stock_prices",
-        "get_current_crypto_price",
+        "get_company_news",
+        "get_available_crypto_tickers",
+        "get_crypto_prices",
         "get_historical_crypto_prices",
+        "get_current_crypto_price"
     ],
     "coinmarketcap": ["quote"],
 }
