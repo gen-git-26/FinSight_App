@@ -38,8 +38,7 @@ def build_agent():
         mcp_capabilities.append("• Yahoo Finance: Real-time stock quotes, historical data, company info")
     if "financial-datasets" in available_servers:
         mcp_capabilities.append("• Financial Datasets: Comprehensive stock & crypto data, historical analysis")
-    if "coinmarketcap" in available_servers:
-        mcp_capabilities.append("• CoinMarketCap: Cryptocurrency prices and market data")
+
     
     mcp_instructions = ""
     if mcp_capabilities:
