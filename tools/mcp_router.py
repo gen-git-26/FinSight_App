@@ -6,7 +6,7 @@ import json
 import asyncio
 from functools import lru_cache
 from datetime import datetime, date
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 from agno.tools import tool
 from rag.fusion import fuse
@@ -52,18 +52,11 @@ KNOWN_TOOLSETS: Dict[str, List[str]] = {
         "get_recommendations",
     ],
     "financial-datasets": [
-        "get_income_statements",
-        "get_balance_sheets",
-        "get_cash_flow_statements",
         "get_current_stock_price",
         "get_historical_stock_prices",
-        "get_company_news",
-        "get_available_crypto_tickers",
-        "get_crypto_prices",
+        "get_current_crypto_price",
         "get_historical_crypto_prices",
-        "get_current_crypto_price"
-    ],
-    "coinmarketcap": ["quote"],
+    ]
 }
 
 # -----------------------------
@@ -73,9 +66,11 @@ KNOWN_TOOLSETS: Dict[str, List[str]] = {
 def _tokenize_words(text: str) -> List[str]:
     return re.findall(r"[A-Za-z0-9\.\-]+", (text or ""))
 
+
 def _extract_regex_tickers(text: str) -> List[str]:
     matches = _TICKER_RE.findall((text or "").upper())
     return [m for m in matches if m not in _STOP]
+
 
 def _detect_crypto_intent(query: str) -> bool:
     q_upper = (query or "").upper()
@@ -86,13 +81,14 @@ def _detect_crypto_intent(query: str) -> bool:
         return True
     return False
 
+
 def _detect_data_type(query: str) -> str:
     q_lower = (query or "").lower()
     if any(k in q_lower for k in ["current", "now", "latest", "today", "real-time", "live", "quote", "price now"]):
         return "realtime"
     if any(k in q_lower for k in ["historical", "history", "past", "chart", "trend", "over time", "since"]):
         return "historical"
-    if any(k in q_lower for k in ["news", "earnings", "report", "announcement", "fundamentals", "upgrade", "downgrade"]):
+    if any(k in q_lower for k in ["news", "earnings", "report", "announcement", "fundamentals", "upgrade", "downgrade", "dividend", "dividends", "split", "splits", "balance sheet", "income statement", "cashflow", "cash flow", "option", "options", "chain"]):
         return "fundamental"
     if any(k in q_lower for k in ["price", "value", "cost", "trading"]):
         return "realtime"
@@ -134,6 +130,7 @@ def _finnhub_symbol_lookup_single(query: str) -> Optional[str]:
     except Exception:
         return None
 
+
 def _maybe_build_crypto_symbol(token: str) -> Optional[str]:
     t = (token or "").strip().upper()
     if not re.fullmatch(r"[A-Z0-9]{2,10}", t):
@@ -144,6 +141,7 @@ def _maybe_build_crypto_symbol(token: str) -> Optional[str]:
     if t in {"USD", "USDT", "USDC"}:
         return None
     return f"{t}-USD"
+
 
 def resolve_tickers(query: str) -> List[str]:
     """
@@ -188,27 +186,24 @@ def resolve_tickers(query: str) -> List[str]:
     return []
 
 # -----------------------------
-# Server & tool selection
+# Server & tool selection (dynamic ranking)
 # -----------------------------
 
-def _select_best_server(query: str, available_servers: Dict[str, MCPServer]) -> Optional[str]:
-    is_crypto = _detect_crypto_intent(query)
-    if is_crypto:
-        if "financial-datasets" in available_servers:
-            return "financial-datasets"
-        if "coinmarketcap" in available_servers:
-            return "coinmarketcap"
-    if "yfinance" in available_servers and not is_crypto:
-        return "yfinance"
-    if "financial-datasets" in available_servers:
-        return "financial-datasets"
-    return next(iter(available_servers.keys())) if available_servers else None
+CATEGORY_KEYWORDS = {
+    "historical": {"historical", "history", "past", "chart", "trend", "since", "backtest"},
+    "news": {"news", "headline", "article", "press", "upgrade", "downgrade"},
+    "fundamental": {"fundamental", "financial", "balance", "income", "cash", "dividend", "split", "holders", "recommendation"},
+    "options": {"option", "options", "chain", "expiration", "strike", "puts", "calls"},
+    "realtime": {"current", "now", "live", "quote", "price", "today"},
+}
+
 
 def _safe_json_loads(txt: str):
     try:
         return json.loads(txt)
     except Exception:
         return None
+
 
 def _normalize_tool_name(raw: Any) -> Optional[str]:
     if isinstance(raw, str):
@@ -226,6 +221,7 @@ def _normalize_tool_name(raw: Any) -> Optional[str]:
         if m:
             s = m.group(1)
     return s or None
+
 
 def _list_server_tools(manager: MCPManager, server: str) -> Dict[str, dict]:
     if hasattr(manager, "list_tools_sync") and callable(getattr(manager, "list_tools_sync")):
@@ -249,6 +245,7 @@ def _list_server_tools(manager: MCPManager, server: str) -> Dict[str, dict]:
         if name.lower() in {"meta", "health", "status"}:
             continue
         tool_obj = t if isinstance(t, dict) else {"name": name}
+        tool_obj["name"] = name
         tools[name] = tool_obj
 
     known = set(KNOWN_TOOLSETS.get(server, []))
@@ -262,43 +259,117 @@ def _list_server_tools(manager: MCPManager, server: str) -> Dict[str, dict]:
 
     return tools
 
-def _choose_tool_from_available(server: str, query: str, data_type: str, tool_names: List[str]) -> Optional[str]:
-    q = (query or "").lower()
-    names = [n for n in tool_names if n.lower() not in {"meta", "health", "status"}]
-    if not names:
-        return None
 
-    if server == "yfinance":
-        if data_type == "historical" and "get_historical_stock_prices" in names:
-            return "get_historical_stock_prices"
-        if "news" in q and "get_yahoo_finance_news" in names:
-            return "get_yahoo_finance_news"
-        if any(w in q for w in ["dividend", "dividends", "split", "splits"]) and "get_stock_actions" in names:
-            return "get_stock_actions"
-        if any(w in q for w in ["financial statement", "balance sheet", "income statement", "cashflow", "cash flow"]) and "get_financial_statement" in names:
-            return "get_financial_statement"
-        if "option" in q and "get_option_chain" in names:
-            return "get_option_chain"
-        if "get_stock_info" in names:
-            return "get_stock_info"
+def _extract_tool_text(tool: dict) -> str:
+    parts = [tool.get("name", "")]
+    desc = tool.get("description") or tool.get("desc") or ""
+    if isinstance(desc, str):
+        parts.append(desc)
+    schema = tool.get("inputSchema") or {}
+    props = schema.get("properties") if isinstance(schema, dict) else {}
+    if isinstance(props, dict):
+        parts.extend(list(props.keys()))
+    return " ".join(str(p) for p in parts if p)
 
-    if server == "financial-datasets":
-        is_crypto = _detect_crypto_intent(query)
-        if data_type == "historical":
-            pref = "get_historical_crypto_prices" if is_crypto else "get_historical_stock_prices"
-            if pref in names:
-                return pref
-        pref = "get_current_crypto_price" if is_crypto else "get_current_stock_price"
-        if pref in names:
-            return pref
 
-    if "quote" in names:
-        return "quote"
+def _score_match(query_tokens: List[str], text: str) -> float:
+    if not text:
+        return 0.0
+    t = text.lower()
+    score = 0.0
+    for qt in query_tokens:
+        if not qt:
+            continue
+        if qt in t:
+            score += 1.0
+        if f" {qt} " in f" {t} ":
+            score += 0.5
+    return score
 
-    return names[0]
+
+def _rank_tools(query: str, tools_map: Dict[str, dict], data_type: str, is_crypto: bool, have_symbol: bool) -> List[Tuple[str, float]]:
+    tokens = [w.lower() for w in _tokenize_words(query)]
+    ranks: List[Tuple[str, float]] = []
+
+    for name, tool in tools_map.items():
+        base = 0.0
+        name_l = name.lower()
+        text = _extract_tool_text(tool).lower()
+
+        # name or description token matches
+        base += _score_match(tokens, text)
+
+        # boosts for category alignment
+        if data_type == "historical" and ("historical" in name_l or "start_date" in text or "period" in text):
+            base += 2.0
+        if data_type == "realtime" and ("current" in name_l or "quote" in name_l or "price" in text):
+            base += 2.0
+        if any(k in tokens for k in CATEGORY_KEYWORDS["news"]) and ("news" in name_l or "headline" in text):
+            base += 2.0
+        if any(k in tokens for k in CATEGORY_KEYWORDS["options"]) and ("option" in name_l or "expiration_date" in text or "strike" in text):
+            base += 2.0
+        if any(k in tokens for k in CATEGORY_KEYWORDS["fundamental"]) and ("financial" in name_l or "income" in text or "balance" in text or "cash" in text or "dividend" in text or "split" in text or "holder" in text or "recommendation" in text):
+            base += 2.0
+
+        # crypto vs stock preference
+        if is_crypto and ("crypto" in name_l or "symbol" in text and "-usd" in query.lower()):
+            base += 1.0
+        if not is_crypto and ("stock" in name_l):
+            base += 0.5
+
+        # satisfiability penalty: if tool requires ticker/symbol and we do not have it
+        schema = tool.get("inputSchema") or {}
+        req = (schema.get("required") if isinstance(schema, dict) else None) or []
+        requires_symbol = any(r in ("ticker", "symbol") for r in req)
+        if requires_symbol and not have_symbol:
+            base -= 2.5
+
+        # small boost if tool is in KNOWN_TOOLSETS for its server name embedded in tool
+        base += 0.0
+
+        ranks.append((name, base))
+
+    ranks.sort(key=lambda x: x[1], reverse=True)
+    return ranks
+
+
+def _pick_best_server_and_tool(query: str, available_servers: Dict[str, MCPServer]) -> Tuple[Optional[str], Optional[str], Dict[str, dict]]:
+    manager = MCPManager()
+    data_type = _detect_data_type(query)
+    is_crypto = _detect_crypto_intent(query)
+    tickers = resolve_tickers(query)
+    have_symbol = bool(tickers)
+
+    best: Tuple[Optional[str], Optional[str], float, Dict[str, dict]] = (None, None, float("-inf"), {})
+
+    for server in available_servers.keys():
+        tools_map = _list_server_tools(manager, server)
+        if not tools_map:
+            continue
+        ranked = _rank_tools(query, tools_map, data_type, is_crypto, have_symbol)
+        if ranked:
+            top_name, top_score = ranked[0]
+            # prefer yfinance for stocks when not crypto, small bias
+            if server == "yfinance" and not is_crypto:
+                top_score += 0.25
+            # prefer financial-datasets for crypto, small bias
+            if server == "financial-datasets" and is_crypto:
+                top_score += 0.25
+            if top_score > best[2]:
+                best = (server, top_name, top_score, tools_map)
+
+    return best[0], best[1], best[3]
+
+
+def _call_tool_blocking(manager: MCPManager, server: str, tool_name: str, args: dict) -> str:
+    if hasattr(manager, "call_sync") and callable(getattr(manager, "call_sync")):
+        return manager.call_sync(server, tool_name, args)
+    res = manager.call(server, tool_name, args)
+    return asyncio.run(res) if asyncio.iscoroutine(res) else res
+
 
 # -----------------------------
-# Options helpers
+# Args builder (guided by schema)
 # -----------------------------
 
 def _parse_yyyy_mm_dd(d: str) -> Optional[date]:
@@ -306,6 +377,7 @@ def _parse_yyyy_mm_dd(d: str) -> Optional[date]:
         return datetime.strptime(d, "%Y-%m-%d").date()
     except Exception:
         return None
+
 
 def _pick_best_expiry(dates: List[str]) -> Optional[str]:
     """
@@ -322,17 +394,6 @@ def _pick_best_expiry(dates: List[str]) -> Optional[str]:
     past = sorted(parsed, key=lambda x: x[0])
     return past[-1][1] if past else None
 
-def _call_tool_blocking(manager: MCPManager, server: str, tool_name: str, args: dict) -> str:
-    if hasattr(manager, "call_sync") and callable(getattr(manager, "call_sync")):
-        return manager.call_sync(server, tool_name, args)
-    res = manager.call(server, tool_name, args)
-    return asyncio.run(res) if asyncio.iscoroutine(res) else res
-
-
-
-# -----------------------------
-# Args builder (guided by schema)
-# -----------------------------
 
 def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query: str, tickers: List[str]) -> Dict[str, Any]:
     """
@@ -342,7 +403,6 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
     """
     schema = tool.get("inputSchema") or {}
     props = schema.get("properties") if isinstance(schema, dict) else {}
-    req = schema.get("required") if isinstance(schema, dict) else []
 
     args: Dict[str, Any] = {}
 
@@ -357,7 +417,7 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
         # sensible defaults for time windows if present in schema
         if "period" in props:
             args.setdefault("period", "1y")
-        if "interval" in props:
+        if "interval" in props and "interval_multiplier" not in props:
             args.setdefault("interval", "1d")
 
         # financial-datasets style historical schema
@@ -372,14 +432,20 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
 
         # yfinance financial statements
         if tool.get("name") == "get_financial_statement" and "financial_type" in props:
-            args.setdefault("financial_type", "income_stmt")
+            # light intent extraction
+            ql = (query or "").lower()
+            if "balance" in ql:
+                args.setdefault("financial_type", "balance_sheet")
+            elif "cash" in ql:
+                args.setdefault("financial_type", "cashflow")
+            else:
+                args.setdefault("financial_type", "income_stmt")
 
         # options chain: choose best expiration if we have a ticker
         if tool.get("name") == "get_option_chain":
+            ql = (query or "").lower()
             if "option_type" in props:
-                qt = (query or "").lower()
-                args.setdefault("option_type", "puts" if ("puts" in qt or "put" in qt) else "calls")
-
+                args.setdefault("option_type", "puts" if ("puts" in ql or "put" in ql) else "calls")
             if "expiration_date" in props:
                 ticker_arg = args.get("ticker") or args.get("symbol")
                 if ticker_arg:
@@ -389,7 +455,7 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
                         if isinstance(data, list):
                             best = _pick_best_expiry(data)
                         else:
-                            # try to parse lines for YYYY-MM-DD
+                            # parse any YYYY-MM-DD lines
                             lines = raw.splitlines() if isinstance(raw, str) else []
                             candidates = [ln.strip() for ln in lines if _parse_yyyy_mm_dd(ln.strip())]
                             best = _pick_best_expiry(candidates)
@@ -401,6 +467,7 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
     # caller will check required fields and decide whether to fail-fast
     return args
 
+
 # -----------------------------
 # Public API
 # -----------------------------
@@ -411,26 +478,17 @@ def route_and_call(query: str) -> str:
         if not available_servers:
             return "No MCP servers configured. Please check MCP_SERVERS in .env"
 
+        # pick server + tool dynamically using ranking across all servers
+        server, tool_name, tools_map = _pick_best_server_and_tool(query, available_servers)
+        if not server or not tool_name:
+            return "No suitable MCP server or tool found"
+
+        manager = MCPManager()
+        tool_obj = tools_map.get(tool_name, {"name": tool_name})
+
         tickers = resolve_tickers(query)
         data_type = _detect_data_type(query)
         is_crypto = _detect_crypto_intent(query)
-
-        server = _select_best_server(query, available_servers)
-        if not server:
-            return "No suitable MCP server found"
-
-        manager = MCPManager()
-
-        tools_map = _list_server_tools(manager, server)
-        tool_names = list(tools_map.keys())
-        if not tool_names:
-            return f"No tools exposed by server '{server}'"
-
-        tool_name = _choose_tool_from_available(server, query, data_type, tool_names)
-        if not tool_name:
-            return f"No matching tool found on server '{server}'"
-
-        tool_obj = tools_map.get(tool_name, {"name": tool_name})
 
         args = _build_args_from_schema(manager, server, tool_obj, query, tickers)
 
@@ -447,6 +505,7 @@ def route_and_call(query: str) -> str:
 
     except Exception as e:
         return f"MCP routing failed: {str(e)}"
+
 
 @tool(
     name="mcp_auto",
