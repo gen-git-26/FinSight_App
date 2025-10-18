@@ -1,4 +1,4 @@
-# tools/answer.py - Simplified: MCP first, summarize MCP data only
+# tools/answer.py - MCP Only with Full Data Display
 from __future__ import annotations
 
 import re
@@ -8,17 +8,6 @@ from typing import Dict, Any, List
 from agno.tools import tool
 from mcp_connection.manager import MCPServer
 from tools.mcp_router import route_and_call
-
-
-# Helpers
-_TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]|-[A-Z]{1,3})?\b")
-
-
-def _should_use_mcp(query: str) -> bool:
-    """Detect if query needs live data."""
-    q = (query or "").lower()
-    # Always try MCP for financial queries
-    return True
 
 
 def _normalize_mcp_payload(payload: Any) -> tuple[bool, Dict]:
@@ -32,37 +21,107 @@ def _normalize_mcp_payload(payload: Any) -> tuple[bool, Dict]:
     return False, {"error": "Invalid payload"}
 
 
+def _format_data_as_text(parsed: Any, max_chars: int = 3000) -> str:
+    """Format parsed data as readable text for display."""
+    
+    # List of records (e.g., options chain, financial statements)
+    if isinstance(parsed, list) and parsed:
+        if isinstance(parsed[0], dict):
+            lines = []
+            lines.append(f"Retrieved {len(parsed)} records:\n")
+            
+            # Show first 5 records with all fields
+            for i, record in enumerate(parsed[:5], 1):
+                lines.append(f"Record {i}:")
+                for key, value in record.items():
+                    # Format value nicely
+                    if isinstance(value, (int, float)):
+                        if isinstance(value, float):
+                            val_str = f"{value:,.2f}" if abs(value) > 0.01 else f"{value}"
+                        else:
+                            val_str = f"{value:,}"
+                    else:
+                        val_str = str(value)
+                    lines.append(f"  {key}: {val_str}")
+                lines.append("")
+            
+            if len(parsed) > 5:
+                lines.append(f"... and {len(parsed) - 5} more records")
+            
+            text = "\n".join(lines)
+            return text[:max_chars]
+        else:
+            return "\n".join(str(item) for item in parsed[:20])
+    
+    # Single dict (e.g., stock info)
+    if isinstance(parsed, dict):
+        lines = []
+        lines.append(f"Data Summary ({len(parsed)} fields):\n")
+        
+        # Show key metrics (common financial fields)
+        key_fields = [
+            "currentPrice", "regularMarketPrice", "fiftyTwoWeekHigh", "fiftyTwoWeekLow",
+            "marketCap", "volume", "averageVolume", "beta", "pe", "trailingPE", "forwardPE",
+            "dividend", "yield", "earnings", "eps", "epsTrailingTwelveMonths",
+            "priceToBook", "priceToSalesTrailing12Months", "debtToEquity", "returnOnAssets",
+            "shortName", "longName", "sector", "industry", "website"
+        ]
+        
+        for field in key_fields:
+            if field in parsed:
+                value = parsed[field]
+                # Format numbers nicely
+                if isinstance(value, (int, float)):
+                    if isinstance(value, float) and value > 100:
+                        val_str = f"{value:,.2f}"
+                    elif isinstance(value, float):
+                        val_str = f"{value:.4f}"
+                    else:
+                        val_str = f"{value:,}"
+                else:
+                    val_str = str(value)
+                lines.append(f"  {field}: {val_str}")
+        
+        # Show any remaining important fields
+        lines.append("\nOther fields:")
+        shown_fields = set(key_fields)
+        for key in sorted(parsed.keys())[:20]:
+            if key not in shown_fields and not key.startswith("_"):
+                value = parsed[key]
+                if isinstance(value, (int, float, str, bool)):
+                    if isinstance(value, float):
+                        val_str = f"{value:.2f}" if abs(value) > 0.01 else str(value)
+                    else:
+                        val_str = str(value)
+                    lines.append(f"  {key}: {val_str}")
+        
+        text = "\n".join(lines)
+        return text[:max_chars]
+    
+    # Fallback
+    return json.dumps(parsed, indent=2, ensure_ascii=False)[:max_chars]
+
+
 def _summarize_mcp_payload(norm: Dict) -> str:
-    """Build a summary from normalized MCP payload."""
+    """Build a summary from normalized MCP payload with full data."""
     route = norm.get("route", {}) or {}
     server = route.get("server", "?")
     tool = route.get("tool", "?")
     ticker = route.get("primary_ticker", "?")
     intent = route.get("intent", "?")
     
-    header = f"{server}/{tool} | {ticker} | {intent}\n"
+    header = f"Data from {server}/{tool}\n🔹 Symbol: {ticker} | Intent: {intent}\n{'='*60}\n"
     
     parsed = norm.get("parsed")
     
-    # If it's a list (e.g., options chain)
-    if isinstance(parsed, list) and parsed:
-        if isinstance(parsed[0], dict):
-            cols = list(parsed[0].keys())[:5]
-            return f"{header} Retrieved {len(parsed)} records with columns: {', '.join(cols)}"
-        else:
-            return f"{header} Retrieved {len(parsed)} items"
-    
-    # If it's a dict (e.g., stock info)
-    if isinstance(parsed, dict):
-        keys = list(parsed.keys())[:5]
-        items_count = len(parsed)
-        return f"{header} Retrieved data with {items_count} fields (sample: {', '.join(keys)})"
+    if parsed:
+        data_text = _format_data_as_text(parsed)
+        return header + data_text
     
     # Fallback to raw
     raw = norm.get("raw", "")
     if isinstance(raw, str) and raw:
-        snippet = raw[:200]
-        return f"{header} Retrieved raw data ({len(raw)} bytes)"
+        return header + f"Retrieved {len(raw)} bytes of data:\n{raw[:2000]}"
     
     return header + "No data returned"
 
@@ -73,7 +132,7 @@ def _summarize_mcp_payload(norm: Dict) -> str:
 
 def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     """
-    Answer using MCP ONLY - no RAG fallback.
+    Answer using MCP ONLY with full data display.
     For all financial queries, route to the best MCP server/tool.
     """
     print(f"[answer_core] Query: {query[:100]}...")
