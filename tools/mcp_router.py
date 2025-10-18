@@ -1,13 +1,13 @@
-# mcp_router.py
+# tools/mcp_router.py
 from __future__ import annotations
 
-import re, json
+import re
+import json
 from datetime import date, timedelta
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
-from mcp_connection.manager import MCPServerManager as MCPManager  # adjust if your class name differs
-from mcp_connection.manager import call_tool_blocking  # if you expose such helper; else use manager.call_sync
+from mcp_connection.manager import MCPManager, MCPServer
 
 _CANDIDATE_RX = re.compile(r"\$?[A-Za-z]{1,5}(?:\.[A-Za-z]{1,2})?")
 
@@ -55,28 +55,26 @@ def _validate_symbol_via_yahoo(sym: str) -> bool:
         manager = MCPManager()
         raw = manager.call_sync("yfinance", "get_stock_info", {"symbol": sym})
         doc = _safe_json_loads(raw)
-        return isinstance(doc, dict) and any(k in doc for k in ("price","marketCap","regularMarketPrice","shortName"))
+        return isinstance(doc, dict) and any(
+            k in doc for k in ("price", "marketCap", "regularMarketPrice", "shortName")
+        )
     except Exception:
         return False
 
 @lru_cache(maxsize=4096)
-def _validate_symbol_via_finnhub(sym: str) -> bool:
+def _validate_symbol_via_financial(sym: str) -> bool:
     try:
         manager = MCPManager()
-        # if you have a lightweight finnhub tool registered:
         raw = manager.call_sync("financial-datasets", "get_current_stock_price", {"ticker": sym})
         return bool(_safe_json_loads(raw))
     except Exception:
         return False
 
 def _dynamic_symbol_ok(sym: str) -> bool:
-    # 1) Yahoo
     if _validate_symbol_via_yahoo(sym):
         return True
-    # 2) Finnhub/financial-datasets fallback
-    if _validate_symbol_via_finnhub(sym):
+    if _validate_symbol_via_financial(sym):
         return True
-    # 3) conservative heuristic fallback
     up = sym.upper()
     if sym != up and "." not in sym:
         return False

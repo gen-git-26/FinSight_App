@@ -5,7 +5,7 @@ import subprocess
 import os
 from typing import Dict
 
-from .manager import MCPServer, MCPManager
+from mcp_connection.manager import MCPManager, MCPServer
 
 _manager: MCPManager | None = None
 _processes: Dict[str, subprocess.Popen] = {}
