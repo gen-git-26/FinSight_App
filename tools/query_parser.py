@@ -1,63 +1,70 @@
-# tools/query_parser.py
+# tools/query_parser.py - FIXED VERSION
+from __future__ import annotations
+
 import json
 import httpx
-from typing import Dict, List, Optional
+import asyncio
+from typing import Optional, List
 from dataclasses import dataclass
 from utils.config import load_settings
+from tools.async_utils import run_async_safe
+from tools.time_parser import parse_time_range_to_days
+
 
 @dataclass
 class ParsedQuery:
     """Structured representation of a financial query."""
     primary_ticker: Optional[str]
     secondary_tickers: List[str]
-    intent: str  # "price", "news", "analysis", "comparison", "options", etc.
+    intent: str  # "price_quote", "news", "analysis", "options", etc.
     data_type: str  # "realtime", "historical", "fundamental"
     time_range: Optional[str]  # "30 days", "1 year", etc.
     specific_date: Optional[str]  # YYYY-MM-DD
-    options_type: Optional[str]  # "calls", "puts", "chain"
+    options_type: Optional[str]  # "calls", "puts"
     expiration_days: Optional[int]
     company_names: List[str]
-    raw_intent: str  # original user query
+    raw_intent: str  # original query
 
 
-async def parse_query_with_llm(query: str) -> ParsedQuery:
+async def _parse_query_with_llm_async(query: str) -> ParsedQuery:
     """
     Use OpenAI GPT to parse the user query structurally.
-    This is much smarter than regex and catches nuances.
+    This is the actual async implementation.
+    Then enhance with time_parser for accurate time conversions.
     """
     cfg = load_settings()
     
     system_prompt = """You are a financial query parser. Extract structured information from user queries.
     
-Return ONLY valid JSON (no markdown, no code blocks) with exactly these fields:
+Return ONLY valid JSON (no markdown, no code blocks, just raw JSON) with exactly these fields:
 {
-  "primary_ticker": "MSFT or null",
+  "primary_ticker": "AAPL or null if not found",
   "secondary_tickers": ["GOOGL"],
-  "intent": "one of: price_quote, news, analysis, comparison, options, fundamentals, dividend, insider, recommendation",
+  "intent": "one of: price_quote, news, analysis, comparison, options, fundamentals, dividend, insider, recommendation, historical",
   "data_type": "one of: realtime, historical, fundamental",
   "time_range": "30 days or null",
   "specific_date": "YYYY-MM-DD or null",
   "options_type": "calls or puts or chain or null",
   "expiration_days": 30 or null,
   "company_names": ["Apple Inc"]
-}"""
+}
 
-    user_message = f"""Parse this financial query and extract structured information:
+Rules:
+- primary_ticker: MAIN stock/crypto symbol (UPPERCASE)
+- intent: What does user want? Recognize: options, fundamentals, price, news, analysis, historical, etc.
+- data_type: Is it real-time, historical, or fundamental data?
+- time_range: Any mention of period? ("last 6 months", "30 days", "1 year")
+- expiration_days: For options, extract days until expiration
+- options_type: "calls" or "puts"
+- company_names: Full names like "Apple Inc", "Microsoft Corporation"
+
+Be strict about JSON format - NO markdown, NO code blocks, just raw JSON."""
+
+    user_message = f"""Parse this financial query:
 
 Query: {query}
 
-Rules:
-- primary_ticker: The main stock/crypto symbol (uppercase)
-- secondary_tickers: Any other symbols mentioned
-- intent: What does the user want to know?
-- data_type: Is it real-time, historical, or fundamental?
-- time_range: Any mention of time period? (e.g., "last 6 months", "30 days")
-- specific_date: Any specific date mentioned?
-- options_type: If asking about options, what type?
-- expiration_days: Days until expiration (e.g., "30 days" = 30)
-- company_names: Full company names mentioned
-
-Be strict: only return valid JSON."""
+Return ONLY valid JSON, no other text."""
 
     headers = {
         "Authorization": f"Bearer {cfg.openai_api_key}",
@@ -86,12 +93,17 @@ Be strict: only return valid JSON."""
             
             content = data["choices"][0]["message"]["content"].strip()
             
-            # Try to extract JSON if it's wrapped in markdown code blocks
+            # Try to extract JSON from various formats
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()
             elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
+                parts = content.split("```")
+                if len(parts) > 1:
+                    content = parts[1].strip()
+                    if content.startswith("json"):
+                        content = content[4:].strip()
             
+            # Parse JSON
             parsed = json.loads(content)
             
             return ParsedQuery(
@@ -106,9 +118,46 @@ Be strict: only return valid JSON."""
                 company_names=parsed.get("company_names", []),
                 raw_intent=query
             )
+    except json.JSONDecodeError as e:
+        print(f"[QueryParser] JSON decode error: {e}")
+        print(f"[QueryParser] Content was: {content[:200]}")
+        return ParsedQuery(
+            primary_ticker=None,
+            secondary_tickers=[],
+            intent="analysis",
+            data_type="realtime",
+            time_range=None,
+            specific_date=None,
+            options_type=None,
+            expiration_days=None,
+            company_names=[],
+            raw_intent=query
+        )
     except Exception as e:
         print(f"[QueryParser] Error: {e}")
-        # Fallback: return empty parsed query
+        return ParsedQuery(
+            primary_ticker=None,
+            secondary_tickers=[],
+            intent="analysis",
+            data_type="realtime",
+            time_range=None,
+            specific_date=None,
+            options_type=None,
+            expiration_days=None,
+            company_names=[],
+            raw_intent=query
+        )
+
+
+def parse_query_with_llm(query: str) -> ParsedQuery:
+    """
+    Safe sync wrapper around async parser.
+    Can be called from Streamlit or sync context without event loop conflicts.
+    """
+    try:
+        return run_async_safe(_parse_query_with_llm_async(query))
+    except Exception as e:
+        print(f"[parse_query_with_llm] Wrapper error: {e}")
         return ParsedQuery(
             primary_ticker=None,
             secondary_tickers=[],
