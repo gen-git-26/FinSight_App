@@ -1,56 +1,46 @@
 # mcp_connection/startup.py
 from __future__ import annotations
 
-import subprocess
-import os
 from typing import Dict
 
-from mcp_connection.manager import MCPManager, MCPServer
+from .manager import MCPManager, MCPServer
 
 _manager: MCPManager | None = None
-_processes: Dict[str, subprocess.Popen] = {}
 
 def get_manager() -> MCPManager:
+    """Singleton-style accessor for the MCP manager."""
     global _manager
     if _manager is None:
         _manager = MCPManager()
     return _manager
 
-def _start_server(name: str, server: MCPServer) -> bool:
+def _health_check_server(manager: MCPManager, name: str) -> bool:
     """
-    Start a persistent MCP server process with Popen if you want them alive during the app.
-    Note: Our MCPManager.call_sync already spins a stdio client per call. This is optional.
+    Health-check a server by attempting to list its tools via stdio client.
+    This spawns the server on-demand and then cleanly tears it down.
     """
     try:
-        env = os.environ.copy()
-        env.update(server.env or {})
-        proc = subprocess.Popen(
-            [server.command] + list(server.args),
-            env=env
-        )
-        _processes[name] = proc
-        return True
+        data = manager.list_tools_sync(name)
+        return isinstance(data, dict) and isinstance(data.get("tools"), list)
     except Exception:
         return False
 
 def startup_mcp_servers() -> Dict[str, bool]:
     """
-    Start all servers specified in MCP_SERVERS.
-    Returns dict of name -> started_successfully.
+    DO NOT spawn persistent processes here.
+    For stdio-based MCP servers, the client should spawn them on-demand.
+    We just run a health-check per configured server.
     """
+    manager = get_manager()
     servers = MCPServer.from_env()
     results: Dict[str, bool] = {}
-    for name, srv in servers.items():
-        # Optional: keep them alive. If you prefer "per-call" stdio only, mark True without starting.
-        ok = _start_server(name, srv)
-        results[name] = bool(ok)
+    for name in servers.keys():
+        results[name] = _health_check_server(manager, name)
     return results
 
 def stop_all_servers() -> None:
-    for name, proc in list(_processes.items()):
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-        except Exception:
-            pass
-        _processes.pop(name, None)
+    """
+    No-op for stdio flow — nothing persistent was started here.
+    Exists for compatibility with setup scripts that call it.
+    """
+    return
