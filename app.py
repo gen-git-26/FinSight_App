@@ -24,7 +24,7 @@ BORDER      = "#2A2F33"
 
 st.set_page_config(
     page_title="FinSight",
-    page_icon=BOT_ICON_PATH,   # אייקון הטאב
+    page_icon=BOT_ICON_PATH,   
     layout="wide"
 )
 
@@ -40,7 +40,7 @@ st.markdown(
       }}
       header, .block-container {{ padding-top: 0.6rem; }}
 
-      /* כרטיסים וצ'אט */
+      /* cards and chat */
       .stExpander, .stChatMessage, .stTextInput, .stTextArea {{
         background: {CARD_DARK} !important;
         border: 1px solid {BORDER} !important;
@@ -48,15 +48,15 @@ st.markdown(
         color: {TEXT_MAIN} !important;
       }}
 
-      /* טקסט בתוך הודעות וצ'אט */
+      /* text user input */
       .stChatMessage p, .stChatMessage span, .stMarkdown, .stMarkdown p, .stMarkdown span {{
         color: {TEXT_MAIN} !important;
       }}
 
-      /* קווי מפריד */
+      /* dividers */
       hr, .stDivider {{ border-color: {BORDER} !important; }}
 
-      /* כפתורים */
+      /* buttons */
       .stButton>button {{
         background: transparent;
         border: 1px solid {PRIMARY_MINT};
@@ -70,7 +70,7 @@ st.markdown(
         background: rgba(154,248,204,0.08);
       }}
 
-      /* קלטים */
+      /* input */
       .stTextInput input, .stTextArea textarea {{
         color: {TEXT_MAIN} !important;
       }}
@@ -78,7 +78,7 @@ st.markdown(
         color: #CFD8DC !important;
       }}
 
-      /* אזור מותג */
+      /* brand subtitle */
       .brand-sub {{
         color: #BFEFE0; 
         margin-bottom: 0.6rem; 
@@ -87,10 +87,11 @@ st.markdown(
         letter-spacing: .2px;
       }}
 
-      /* אייקון הבוט ליד הכפתור */
+      /* bot icon */
       .agent-icon {{
-        width: 40px; height: 40px; border-radius: 12px; 
-        border: 1px solid {PRIMARY_MINT}; background: rgba(154,248,204,0.05);
+        width: 60px; height: 60px; border-radius: 30px; 
+        border: none !important;
+        background: none !important;
         display: flex; align-items: center; justify-content: center; overflow: hidden;
       }}
     </style>
@@ -105,7 +106,7 @@ col_logo, col_title, col_spacer = st.columns([0.14, 0.86, 0.10], vertical_alignm
 with col_logo:
     st.image(LOGO_PATH, use_container_width=True)
 with col_title:
-    # רק "Smart Financial Agent" ובפונט מוגדל
+    st.markdown("<h1 style='margin-bottom: 0.1rem;'>See Beyond The Numbers</h1>", unsafe_allow_html=True)
     st.markdown('<div class="brand-sub">Smart Financial Agent</div>', unsafe_allow_html=True)
 
 # -----------------------------
@@ -157,17 +158,17 @@ if not st.session_state["mcp_started"]:
 # -----------------------------
 agent_col1, agent_col2 = st.columns([0.06, 0.94], vertical_alignment="center")
 with agent_col1:
-    # בלי file:// בתוך HTML. מציגים ישירות עם st.image כדי שלא יחסם בדפדפן.
+    # Agent icon
     with st.container(border=False):
         st.markdown('<div class="agent-icon">', unsafe_allow_html=True)
-        st.image(BOT_ICON_PATH, width=28)
+        st.image(BOT_ICON_PATH, width=60)
         st.markdown('</div>', unsafe_allow_html=True)
 
 with agent_col2:
     run_agent = st.button("Run FinSight Agent", use_container_width=True)
 
 if run_agent:
-    st.session_state["messages"].append({"role": "user", "content": "Analyze NVDA earnings and summarize key drivers."})
+    st.session_state["messages"].append({"role": "user", "content": "Ask me anything..."})
 
 # -----------------------------
 # Chat history (with custom assistant avatar)
