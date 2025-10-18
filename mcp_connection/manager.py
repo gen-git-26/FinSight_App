@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shlex
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
+
+DEFAULT_INIT_TIMEOUT = float(os.getenv("MCP_INIT_TIMEOUT_SEC", "3.0"))
+DEFAULT_CALL_TIMEOUT = float(os.getenv("MCP_CALL_TIMEOUT_SEC", "5.0"))
+DEFAULT_LIST_TIMEOUT = float(os.getenv("MCP_LIST_TIMEOUT_SEC", "4.0"))
 
 @dataclass
 class MCPServer:
@@ -21,13 +24,8 @@ class MCPServer:
     @staticmethod
     def from_env() -> Dict[str, "MCPServer"]:
         """
-        Read MCP_SERVERS env as JSON list of:
-        {
-          "name": "yfinance",
-          "command": "/path/to/python",
-          "args": ["-u", "/path/to/server.py"],
-          "env": {"PYTHONUNBUFFERED": "1"}
-        }
+        Expect MCP_SERVERS env as JSON list of:
+        {"name":"yfinance","command":"/path/to/python","args":["-u","/path/to/server.py"],"env":{"PYTHONUNBUFFERED":"1"}}
         """
         cfg = os.getenv("MCP_SERVERS", "[]")
         data = json.loads(cfg)
@@ -46,75 +44,89 @@ class MCPServer:
 
 class MCPManager:
     """
-    Minimal manager to start a single MCP server process and call tools.
-    We use stdio client per call for simplicity.
+    Stdio-based, on-demand MCP client with hard timeouts.
+    Each call spins the server and tears it down cleanly.
     """
 
     def __init__(self):
         self._servers = MCPServer.from_env()
 
-    async def _call(self, server_name: str, tool: str, args: Dict[str, Any]) -> Any:
+    async def _session(self, server_name: str) -> ClientSession:
         if server_name not in self._servers:
             raise RuntimeError(f"Server '{server_name}' not configured")
         cfg = self._servers[server_name]
-        params = StdioServerParameters(
-            command=cfg.command,
-            args=cfg.args,
-            env=cfg.env or None,
-        )
-        async with stdio_client(params) as (read, write):
-            session = ClientSession(read, write)
-            await session.initialize()
+        params = StdioServerParameters(command=cfg.command, args=cfg.args, env=cfg.env or None)
+        read, write = await stdio_client(params).__aenter__()  # manual to guarantee __aexit__ later
+        session = ClientSession(read, write)
+        try:
+            await asyncio.wait_for(session.initialize(), timeout=DEFAULT_INIT_TIMEOUT)
+        except Exception:
+            # ensure we close transport on init failure
             try:
-                result = await session.call_tool(tool, args or {})
-                # result is MCP ToolResponse -> normalize
-                if hasattr(result, "content"):
-                    # Try to find a text/json block
-                    for block in result.content:
-                        if getattr(block, "type", "") == "text":
-                            return block.text
-                        if getattr(block, "type", "") == "json":
-                            return json.dumps(block.data)
-                return str(result)
-            finally:
                 await session.close()
+            except Exception:
+                pass
+            await stdio_client(params).__aexit__(None, None, None)
+            raise
+        # attach cleaner for caller
+        session._stdio_params = params  # type: ignore[attr-defined]
+        return session
+
+    async def _close(self, session: ClientSession) -> None:
+        try:
+            await session.close()
+        except Exception:
+            pass
+        try:
+            params = getattr(session, "_stdio_params", None)
+            if params is not None:
+                await stdio_client(params).__aexit__(None, None, None)
+        except Exception:
+            pass
+
+    async def _call(self, server_name: str, tool: str, args: Dict[str, Any]) -> Any:
+        session = await self._session(server_name)
+        try:
+            result = await asyncio.wait_for(session.call_tool(tool, args or {}), timeout=DEFAULT_CALL_TIMEOUT)
+            # Normalize ToolResponse content
+            if hasattr(result, "content"):
+                for block in getattr(result, "content", []):
+                    typ = getattr(block, "type", "")
+                    if typ == "text":
+                        return block.text
+                    if typ == "json":
+                        try:
+                            return json.dumps(block.data)
+                        except Exception:
+                            return block.data
+            return str(result)
+        finally:
+            await self._close(session)
 
     def call_sync(self, server_name: str, tool: str, args: Dict[str, Any]) -> Any:
         return asyncio.run(self._call(server_name, tool, args))
 
     async def list_tools(self, server_name: str) -> Dict[str, Any]:
-        if server_name not in self._servers:
-            raise RuntimeError(f"Server '{server_name}' not configured")
-        cfg = self._servers[server_name]
-        params = StdioServerParameters(
-            command=cfg.command,
-            args=cfg.args,
-            env=cfg.env or None,
-        )
-        async with stdio_client(params) as (read, write):
-            session = ClientSession(read, write)
-            await session.initialize()
-            try:
-                items = await session.list_tools()
-                tools_list: List[Dict[str, Any]] = []
-                for t in items:
-                    if hasattr(t, "model_dump"):
-                        tools_list.append(t.model_dump())
-                    elif isinstance(t, dict):
-                        tools_list.append(t)
-                return {"tools": tools_list}
-            finally:
-                await session.close()
+        session = await self._session(server_name)
+        try:
+            items = await asyncio.wait_for(session.list_tools(), timeout=DEFAULT_LIST_TIMEOUT)
+            tools_list: List[Dict[str, Any]] = []
+            for t in items:
+                if hasattr(t, "model_dump"):
+                    tools_list.append(t.model_dump())
+                elif isinstance(t, dict):
+                    tools_list.append(t)
+                else:
+                    # best effort normalization
+                    name = getattr(t, "name", None) or str(t)
+                    tools_list.append({"name": name})
+            return {"tools": tools_list}
+        finally:
+            await self._close(session)
 
     def list_tools_sync(self, server_name: str) -> Dict[str, Any]:
         return asyncio.run(self.list_tools(server_name))
-    
-    
-    def stop_all_servers(self) -> None:
-        """
-        This manager uses per-call stdio sessions only and does not own
-        persistent MCP processes. Persistent servers (if any) are managed
-        by mcp_connection.startup. This is a no-op for compatibility.
-        """
-        return
 
+    # Compatibility no-op for setup scripts that call get_manager().stop_all_servers()
+    def stop_all_servers(self) -> None:
+        return
