@@ -64,10 +64,7 @@ class HybridQdrant:
 
     
     def ensure_collections(self, dense_dim: Optional[int] = None) -> None:
-        """
-        יוצר/מוודא קולקציה עם וקטור צפוף 'text' וספראז 'bm25' ואינדקסי payload.
-        רצה פעם אחת לכל מופע.
-        """
+        """Ensures that the Qdrant collection exists with the proper configuration."""
         if self._ensured:
             return
 
@@ -123,6 +120,7 @@ class HybridQdrant:
 
     # --------- Upsert ---------
     async def upsert_snippets(self, items: List[Dict[str, Any]]) -> None:
+        """Upserts a list of snippets into the Qdrant collection."""
         from rag.embeddings import embed_texts, sparse_from_text  
 
         self.ensure_collections()
@@ -154,7 +152,6 @@ class HybridQdrant:
                 )
             )
 
-        # אפשר להוסיף wait=True אם רוצים לחכות לכתיבה:
         self.client.upsert(collection_name=self.collection, points=points)
 
     # --------- Filters helper ---------
@@ -165,6 +162,7 @@ class HybridQdrant:
         type_in: Optional[List[str]] = None,
         user_in: Optional[List[str]] = None,
     ) -> Optional[rest.Filter]:
+        """Creates a Qdrant filter based on the provided criteria."""
         must: List[rest.FieldCondition] = []
 
         if date_gte:
@@ -197,10 +195,7 @@ class HybridQdrant:
         must: Optional[List[rest.FieldCondition]] = None,
         should: Optional[List[rest.FieldCondition]] = None,
     ) -> List[rest.ScoredPoint]:
-        """
-        מריץ חיפוש צפוף וחיפוש BM25 בנפרד, מאחה בעזרת RRF,
-        ותומך בשני מצבי פילטר: MUST ו-SHOULD (לריכוך).
-        """
+        """Performs a hybrid search using both dense and sparse vectors with RRF fusion."""
         self.ensure_collections()
 
         flt_must = rest.Filter(must=must) if must else None
