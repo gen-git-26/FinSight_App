@@ -13,48 +13,50 @@ from tools.mcp_router import route_and_call
 # -----------------------------
 # Theme & assets
 # -----------------------------
-LOGO_PATH = "/mnt/data/logo.png"  # FinSight logo
-BOT_ICON_PATH = "/mnt/data/bot_icon.png"                           # Agent icon
+LOGO_PATH = "/workspaces/new_test/data/logo.png"   # FinSight logo
+BOT_ICON_PATH = "/workspaces/new_test/data/bot_icon.png"                            # Agent icon
 
-PRIMARY_MINT = "#9AF8CC"   
-TEXT_MAIN   = "#E6FFF4"
+PRIMARY_MINT = "#9AF8CC"
+TEXT_MAIN   = "#FFFFFF"   
 BG_DARK     = "#0D0F10"
 CARD_DARK   = "#121416"
 BORDER      = "#2A2F33"
 
 st.set_page_config(
     page_title="FinSight",
-    page_icon=BOT_ICON_PATH,  # אייקון לשונית
+    page_icon=BOT_ICON_PATH,   # אייקון הטאב
     layout="wide"
 )
 
-# Global CSS (שחור מלא + סטייל כפתורים ותיבות)
+# -----------------------------
+# Global CSS
+# -----------------------------
 st.markdown(
     f"""
     <style>
-      /* Background + text */
       .stApp {{
         background: {BG_DARK};
         color: {TEXT_MAIN};
       }}
-      /* Hide default Streamlit header gap */
-      header, .block-container {{
-        padding-top: 0.6rem;
-      }}
+      header, .block-container {{ padding-top: 0.6rem; }}
 
-      /* Card-like containers (expanders/chat) */
+      /* כרטיסים וצ'אט */
       .stExpander, .stChatMessage, .stTextInput, .stTextArea {{
         background: {CARD_DARK} !important;
         border: 1px solid {BORDER} !important;
         border-radius: 14px !important;
+        color: {TEXT_MAIN} !important;
       }}
 
-      /* Nice separators */
-      .st-emotion-cache-1cvow4s hr, .stDivider {{
-        border-color: {BORDER} !important;
+      /* טקסט בתוך הודעות וצ'אט */
+      .stChatMessage p, .stChatMessage span, .stMarkdown, .stMarkdown p, .stMarkdown span {{
+        color: {TEXT_MAIN} !important;
       }}
 
-      /* Buttons */
+      /* קווי מפריד */
+      hr, .stDivider {{ border-color: {BORDER} !important; }}
+
+      /* כפתורים */
       .stButton>button {{
         background: transparent;
         border: 1px solid {PRIMARY_MINT};
@@ -66,34 +68,31 @@ st.markdown(
       }}
       .stButton>button:hover {{ 
         background: rgba(154,248,204,0.08);
-        border-color: {PRIMARY_MINT};
-      }}
-      .stButton>button:focus {{ outline: none; }}
-
-      /* Chat input placeholder color */
-      .stTextInput input::placeholder {{
-        color: #7aa996;
       }}
 
-      /* Title row spacing */
-      .finsight-title {{
-        display: flex; align-items: center; gap: 0.75rem;
-        margin-bottom: 0.25rem;
+      /* קלטים */
+      .stTextInput input, .stTextArea textarea {{
+        color: {TEXT_MAIN} !important;
       }}
+      .stTextInput input::placeholder, .stTextArea textarea::placeholder {{
+        color: #CFD8DC !important;
+      }}
+
+      /* אזור מותג */
       .brand-sub {{
-        color: #9bcab8; margin-bottom: 0.75rem; font-size: 0.95rem;
+        color: #BFEFE0; 
+        margin-bottom: 0.6rem; 
+        font-size: 1.35rem; 
+        font-weight: 700;
+        letter-spacing: .2px;
       }}
 
-      /* Agent row */
-      .agent-row {{
-        display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0 1rem 0;
-      }}
+      /* אייקון הבוט ליד הכפתור */
       .agent-icon {{
         width: 40px; height: 40px; border-radius: 12px; 
         border: 1px solid {PRIMARY_MINT}; background: rgba(154,248,204,0.05);
         display: flex; align-items: center; justify-content: center; overflow: hidden;
       }}
-      .agent-icon img {{ width: 70%; height: 70%; object-fit: contain; filter: brightness(0.9); }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -106,7 +105,8 @@ col_logo, col_title, col_spacer = st.columns([0.14, 0.86, 0.10], vertical_alignm
 with col_logo:
     st.image(LOGO_PATH, use_container_width=True)
 with col_title:
-    st.markdown('<div class="brand-sub">Smart Financial Agent • Fusion RAG • Live Market Tools</div>', unsafe_allow_html=True)
+    # רק "Smart Financial Agent" ובפונט מוגדל
+    st.markdown('<div class="brand-sub">Smart Financial Agent</div>', unsafe_allow_html=True)
 
 # -----------------------------
 # MCP controls (sidebar)
@@ -116,7 +116,6 @@ with st.sidebar:
     st.subheader("MCP Server Status")
     servers = MCPServer.from_env()
     manager = get_manager()
-
     if not servers:
         st.info("No MCP servers configured. Set MCP_SERVERS in .env")
     else:
@@ -154,33 +153,35 @@ if not st.session_state["mcp_started"]:
             st.info("ℹ No MCP servers configured")
 
 # -----------------------------
-# Agent button (with icon)
+# Agent button with visible icon
 # -----------------------------
 agent_col1, agent_col2 = st.columns([0.06, 0.94], vertical_alignment="center")
 with agent_col1:
-    st.markdown(
-        f"""
-        <div class="agent-row">
-          <div class="agent-icon">
-            <img src="file://{BOT_ICON_PATH}" alt="bot icon"/>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # בלי file:// בתוך HTML. מציגים ישירות עם st.image כדי שלא יחסם בדפדפן.
+    with st.container(border=False):
+        st.markdown('<div class="agent-icon">', unsafe_allow_html=True)
+        st.image(BOT_ICON_PATH, width=28)
+        st.markdown('</div>', unsafe_allow_html=True)
+
 with agent_col2:
     run_agent = st.button("Run FinSight Agent", use_container_width=True)
 
-# If agent button clicked, seed an example action (optional)
 if run_agent:
     st.session_state["messages"].append({"role": "user", "content": "Analyze NVDA earnings and summarize key drivers."})
 
 # -----------------------------
-# Chat history
+# Chat history (with custom assistant avatar)
 # -----------------------------
 for m in st.session_state["messages"]:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+    if m["role"] == "assistant":
+        with st.chat_message("assistant", avatar=BOT_ICON_PATH):
+            st.markdown(m["content"])
+    elif m["role"] == "user":
+        with st.chat_message("user"):
+            st.markdown(m["content"])
+    else:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
 
 # -----------------------------
 # Chat input
@@ -240,8 +241,8 @@ if prompt:
             except Exception:
                 pass
 
-    # Final assistant answer
-    with st.chat_message("assistant"):
+    # Final assistant answer (shows with bot avatar)
+    with st.chat_message("assistant", avatar=BOT_ICON_PATH):
         try:
             out = answer_core(prompt)
             txt = (out or {}).get("answer", "")
