@@ -108,3 +108,13 @@ class MCPManager:
 
     def list_tools_sync(self, server_name: str) -> Dict[str, Any]:
         return asyncio.run(self.list_tools(server_name))
+    
+    
+    def stop_all_servers(self) -> None:
+        """
+        This manager uses per-call stdio sessions only and does not own
+        persistent MCP processes. Persistent servers (if any) are managed
+        by mcp_connection.startup. This is a no-op for compatibility.
+        """
+        return
+
