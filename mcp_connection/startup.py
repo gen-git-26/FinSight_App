@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Dict
 
-from .manager import MCPManager, MCPServer
+from mcp_connection.manager import MCPManager, MCPServer
 
 _manager: MCPManager | None = None
 
