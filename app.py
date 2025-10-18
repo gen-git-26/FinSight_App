@@ -86,14 +86,22 @@ st.markdown(
         font-weight: 700;
         letter-spacing: .2px;
       }}
+    
+      /*icon inline fix*/
+      .align-center {{
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        }}
 
-      /* bot icon */
-      .agent-icon {{
-        width: 60px; height: 60px; border-radius: 30px; 
-        border: none !important;
-        background: none !important;
-        display: flex; align-items: center; justify-content: center; overflow: hidden;
-      }}
+
+      /* delete streamlit watermark */
+        [data-testid="stImage"] img {{
+        margin: 0 !important; 
+        display: block; 
+        }}
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -158,11 +166,14 @@ if not st.session_state["mcp_started"]:
 # -----------------------------
 agent_col1, agent_col2 = st.columns([0.06, 0.94], vertical_alignment="center")
 with agent_col1:
-    # Agent icon
-    with st.container(border=False):
-        st.markdown('<div class="agent-icon">', unsafe_allow_html=True)
-        st.image(BOT_ICON_PATH, width=60)
-        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div style='display:flex; align-items:center; justify-content:center; height:100%;'>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.image(BOT_ICON_PATH, width=60)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 with agent_col2:
     run_agent = st.button("Run FinSight Agent", use_container_width=True)
