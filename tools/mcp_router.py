@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from agno.tools import tool
 from rag.fusion import fuse
 from mcp_connection.manager import MCPManager, MCPServer
+from tools.query_parser import ParsedQuery
 
 # -----------------------------
 # Constants & heuristics 
@@ -472,39 +473,159 @@ def _build_args_from_schema(manager: MCPManager, server: str, tool: dict, query:
 # Public API
 # -----------------------------
 
-def route_and_call(query: str) -> str:
+async def route_and_call_v2(query: str) -> Dict[str, str]:
+    """
+    NEW: Use LLM parser + dynamic server selection.
+    Returns: {"route": {...}, "parsed": {...}, "raw": str, "error": str}
+    """
     try:
+        # Step 1: Parse query with LLM
+        from tools.query_parser import parse_query_with_llm
+        import asyncio
+        
+        parsed_query = await parse_query_with_llm(query)
+        
         available_servers = MCPServer.from_env()
         if not available_servers:
-            return "No MCP servers configured. Please check MCP_SERVERS in .env"
-
-        # pick server + tool dynamically using ranking across all servers
-        server, tool_name, tools_map = _pick_best_server_and_tool(query, available_servers)
-        if not server or not tool_name:
-            return "No suitable MCP server or tool found"
-
+            return {"error": "No MCP servers configured"}
+        
+        # Step 2: Select best server based on parsed intent
         manager = MCPManager()
+        server = None
+        
+        # Logic: crypto intent → financial-datasets, else → yfinance
+        if parsed_query.intent in ("options", "fundamentals", "recommendation"):
+            server = "yfinance" if "yfinance" in available_servers else next(iter(available_servers))
+        elif any(ticker and ticker.endswith("-USD") for ticker in [parsed_query.primary_ticker] + parsed_query.secondary_tickers):
+            server = "financial-datasets" if "financial-datasets" in available_servers else next(iter(available_servers))
+        else:
+            server = "yfinance" if "yfinance" in available_servers else "financial-datasets" if "financial-datasets" in available_servers else next(iter(available_servers))
+        
+        # Step 3: List tools from chosen server
+        tools_map = _list_server_tools(manager, server)
+        
+        # Step 4: Pick best tool based on intent
+        tool_name = _pick_tool_by_intent(parsed_query.intent, tools_map, server)
+        if not tool_name:
+            return {"error": f"No suitable tool found for intent: {parsed_query.intent}"}
+        
+        # Step 5: Build arguments
         tool_obj = tools_map.get(tool_name, {"name": tool_name})
-
-        tickers = resolve_tickers(query)
-        data_type = _detect_data_type(query)
-        is_crypto = _detect_crypto_intent(query)
-
-        args = _build_args_from_schema(manager, server, tool_obj, query, tickers)
-
-        # If the tool schema requires a ticker/symbol and we don't have one -> friendly fail-fast
-        schema = tool_obj.get("inputSchema") or {}
-        req = (schema.get("required") if isinstance(schema, dict) else None) or []
-        requires_symbol = any(r in ("ticker", "symbol") for r in req)
-        if requires_symbol and not (args.get("ticker") or args.get("symbol")):
-            return "Could not resolve a ticker from the query. Please specify a symbol (e.g., MSFT)."
-
-        routing_info = f"Route: {server}/{tool_name} | Type: {data_type} | Crypto: {is_crypto} | Tickers: {tickers}"
+        args = _build_args_from_parsed_query(
+            manager, server, tool_obj, parsed_query
+        )
+        
+        # Step 6: Call the tool
         result = _call_tool_blocking(manager, server, tool_name, args)
-        return f"{routing_info}\n\n{result}"
-
+        
+        return {
+            "route": {
+                "server": server,
+                "tool": tool_name,
+                "primary_ticker": parsed_query.primary_ticker,
+                "intent": parsed_query.intent,
+                "data_type": parsed_query.data_type
+            },
+            "parsed": _safe_json_loads(result),
+            "raw": result,
+            "error": None
+        }
+        
     except Exception as e:
-        return f"MCP routing failed: {str(e)}"
+        return {"error": f"Routing failed: {str(e)}"}
+
+
+def _pick_tool_by_intent(intent: str, tools_map: Dict[str, dict], server: str) -> Optional[str]:
+    """Pick the best tool based on parsed intent."""
+    intent_map = {
+        "price_quote": ["get_current_stock_price", "get_stock_info", "quote"],
+        "news": ["get_yahoo_finance_news", "get_company_news"],
+        "analysis": ["get_stock_info", "get_financial_statement"],
+        "fundamentals": ["get_financial_statement", "get_balance_sheets", "get_income_statements"],
+        "options": ["get_option_chain"],
+        "recommendation": ["get_recommendations"],
+        "dividend": ["get_stock_actions"],
+        "insider": ["get_holder_info"]
+    }
+    
+    candidates = intent_map.get(intent, [])
+    for tool_name in candidates:
+        if tool_name in tools_map:
+            return tool_name
+    
+    # Fallback: return first tool
+    return next(iter(tools_map)) if tools_map else None
+
+
+def _build_args_from_parsed_query(
+    manager: MCPManager,
+    server: str,
+    tool: dict,
+    parsed: "ParsedQuery"
+) -> Dict[str, any]:
+    """Build tool arguments from structured parsed query."""
+    
+    schema = tool.get("inputSchema", {})
+    props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    
+    args = {}
+    
+    # Ticker/symbol
+    if "ticker" in props and parsed.primary_ticker:
+        args["ticker"] = parsed.primary_ticker
+    elif "symbol" in props and parsed.primary_ticker:
+        args["symbol"] = parsed.primary_ticker
+    
+    # Time range
+    if "period" in props:
+        if parsed.time_range and "6 month" in parsed.time_range.lower():
+            args["period"] = "6mo"
+        elif parsed.time_range and "year" in parsed.time_range.lower():
+            args["period"] = "1y"
+        else:
+            args["period"] = "1y"  # default
+    
+    if "interval" in props:
+        args["interval"] = "1d"  # default
+    
+    # Financial statement type
+    if tool.get("name") == "get_financial_statement":
+        if "balance" in parsed.raw_intent.lower():
+            args["financial_type"] = "balance_sheet"
+        elif "cash" in parsed.raw_intent.lower():
+            args["financial_type"] = "cashflow"
+        else:
+            args["financial_type"] = "income_stmt"
+    
+    # Options expiration
+    if tool.get("name") == "get_option_chain" and parsed.expiration_days:
+        if "expiration_date" in props and parsed.primary_ticker:
+            try:
+                # Get available expirations and pick closest to parsed.expiration_days
+                raw = _call_tool_blocking(
+                    manager, server, "get_option_expiration_dates",
+                    {"ticker": parsed.primary_ticker}
+                )
+                dates = _safe_json_loads(raw) or []
+                if isinstance(dates, list) and dates:
+                    args["expiration_date"] = dates[0]  # Simplified: pick first
+            except Exception:
+                pass
+        
+        if "option_type" in props:
+            args["option_type"] = parsed.options_type or "calls"
+    
+    return args
+
+
+# Synchronous wrapper for use in non-async context
+def route_and_call(query: str) -> Dict[str, any]:
+    """Wrapper to call async function from sync context."""
+    import asyncio
+    try:
+        return asyncio.run(route_and_call_v2(query))
+    except Exception as e:
+        return {"error": f"Route error: {str(e)}"}
 
 
 @tool(

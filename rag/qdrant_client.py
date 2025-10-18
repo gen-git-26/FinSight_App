@@ -63,61 +63,66 @@ class HybridQdrant:
         self._ensured = False
 
     
-    def ensure_collections(self, dense_dim: Optional[int] = None) -> None:
-        """Ensures that the Qdrant collection exists with the proper configuration."""
-        if self._ensured:
-            return
+def ensure_collections(self, dense_dim: Optional[int] = None) -> None:
+    if self._ensured:
+        return
 
-        colls = [c.name for c in self.client.get_collections().collections]
-        if self.collection in colls:
-           
-            for field, schema in [
-                ("symbol", rest.PayloadSchemaType.KEYWORD),
-                ("type", rest.PayloadSchemaType.KEYWORD),
-                ("date", rest.PayloadSchemaType.TEXT),
-                ("user", rest.PayloadSchemaType.KEYWORD),
-            ]:
-                try:
-                    self.client.create_payload_index(
-                        self.collection, field_name=field, field_schema=schema
-                    )
-                except Exception:
-                
-                    pass
-            self._ensured = True
-            return
+    colls = [c.name for c in self.client.get_collections().collections]
+    
+    # check existing collection
+    if self.collection in colls:
+        try:
+            info = self.client.get_collection(self.collection)
+            existing_dim = None
+            if hasattr(info, 'config') and hasattr(info.config, 'params'):
+                vectors = info.config.params.vectors
+                if isinstance(vectors, dict) and 'text' in vectors:
+                    existing_dim = vectors['text'].size
+            
+            # Check for dimension mismatch
+            if existing_dim and existing_dim != 3072:
+                print(f"[Qdrant] Deleting collection with mismatched dims: {existing_dim} → 3072")
+                self.client.delete_collection(self.collection)
+            else:
+                # build payload indices
+                for field, schema in [
+                    ("symbol", rest.PayloadSchemaType.KEYWORD),
+                    ("type", rest.PayloadSchemaType.KEYWORD),
+                    ("date", rest.PayloadSchemaType.TEXT),
+                    ("user", rest.PayloadSchemaType.KEYWORD),
+                ]:
+                    try:
+                        self.client.create_payload_index(self.collection, field_name=field, field_schema=schema)
+                    except Exception:
+                        pass
+                self._ensured = True
+                return
+        except Exception as e:
+            print(f"[Qdrant] Error checking collection: {e}")
 
-       
-        if dense_dim is None:
-          
-            dense_dim = 3072
+    # create collection
+    self.client.recreate_collection(
+        collection_name=self.collection,
+        vectors_config={
+            "text": rest.VectorParams(size=3072, distance=rest.Distance.COSINE),
+        },
+        sparse_vectors_config={
+            "bm25": rest.SparseVectorParams(),
+        },
+    )
+    
+    for field, schema in [
+        ("symbol", rest.PayloadSchemaType.KEYWORD),
+        ("type", rest.PayloadSchemaType.KEYWORD),
+        ("date", rest.PayloadSchemaType.TEXT),
+        ("user", rest.PayloadSchemaType.KEYWORD),
+    ]:
+        try:
+            self.client.create_payload_index(self.collection, field_name=field, field_schema=schema)
+        except Exception:
+            pass
 
-        self.client.recreate_collection(
-            collection_name=self.collection,
-            vectors_config={
-                "text": rest.VectorParams(size=dense_dim, distance=rest.Distance.COSINE),
-            },
-            sparse_vectors_config={
-                "bm25": rest.SparseVectorParams(),
-            },
-        )
-
-        # Create payload indices for common fields
-        for field, schema in [
-            ("symbol", rest.PayloadSchemaType.KEYWORD),
-            ("type", rest.PayloadSchemaType.KEYWORD),
-            ("date", rest.PayloadSchemaType.TEXT),
-            ("user", rest.PayloadSchemaType.KEYWORD),
-        ]:
-            try:
-                self.client.create_payload_index(
-                    self.collection, field_name=field, field_schema=schema
-                )
-            except Exception:
-                pass
-
-        self._ensured = True
-
+    self._ensured = True
     # --------- Upsert ---------
     async def upsert_snippets(self, items: List[Dict[str, Any]]) -> None:
         """Upserts a list of snippets into the Qdrant collection."""

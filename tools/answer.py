@@ -164,92 +164,43 @@ def _summarize_mcp_payload(norm: Payload, max_rows: int = 5) -> str:
 # -----------------------------------------------------
 
 
+# tools/answer.py - החלף את answer_core
+
 def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     style = _detect_style(query, style)
-
-    # Collect up to 3 explicit tickers found in the query (best effort)
-    tickers = list(
-        dict.fromkeys(
-            ([t.strip().upper() for t in (ticker.split() if ticker else [])] + _extract_tickers(query))
-        )
-    )
-
-    # Decide whether live MCP should be attempted
-    should_use = _should_use_mcp(query)
+    
+    # Try MCP first (with new parser)
     servers = MCPServer.from_env()
-    mcp_attempted = False
     mcp_success = False
-    mcp_norm: Payload = {}
-
-    if should_use and servers:
+    mcp_norm = {}
+    
+    if servers:
         try:
-            mcp_payload = mcp_auto(query)  # may be dict or str
-            mcp_attempted = True
+            mcp_payload = mcp_auto(query)  # Uses new route_and_call_v2 internally
             mcp_success, mcp_norm = _normalize_mcp_payload(mcp_payload)
-        except Exception:
-            mcp_attempted = True
+        except Exception as e:
+            print(f"[answer] MCP failed: {e}")
             mcp_success = False
-            mcp_norm = {"error": "MCP call failed"}
-
-    # If MCP is successful, avoid RAG retrieval to prevent vector-size errors
+    
+    # RAG fallback
     docs = []
     if not mcp_success:
-        # Build filters only when we intend to hit the vector DB
-        flt: List[rest.FieldCondition] = []
-        if tickers:
-            flt.append(rest.FieldCondition(key="symbol", match=rest.MatchAny(any=tickers[:3])))
-        doc_types = ["quote", "overview", "basic_financials", "as_reported"]
-        if servers:
-            doc_types.append("mcp")
-        flt.append(rest.FieldCondition(key="type", match=rest.MatchAny(any=doc_types)))
-
         try:
-            docs = asyncio.run(retrieve(query, filters=flt, k=24))
+            flt = []
+            docs = asyncio.run(retrieve(query, filters=flt if not flt else None, k=24))
         except Exception:
             docs = []
-
-    # Memory context
-    try:
-        mem_ctx = asyncio.run(fetch_memory(query=query, k=3))
-    except Exception:
-        mem_ctx = ""
-
-    extra_context = mem_ctx
-    if mcp_attempted:
-        extra_context += "\n[Data Source Status: {}]".format(
-            "Live data included" if mcp_success else "Live data unavailable, using cached data"
-        )
-        if not mcp_success and should_use:
-            extra_context += "\n[Note: Live data requested but MCP unavailable]"
-
-    # Decide max token budget for summarization path
-    max_tok = 1200 if (style == "report" and mcp_success) else (900 if style == "report" else (650 if mcp_success else 512))
-
+    
+    # Summarize
     if mcp_success:
-        # Build a text answer summarizing the live payload
         answer_text = _summarize_mcp_payload(mcp_norm)
-        snippets: List[Dict[str, Any]] = []
+        snippets = []
     else:
-        # RAG summarize
         answer_text, snippets = asyncio.run(
-            rerank_and_summarize(query, docs, style=style, extra_context=extra_context, max_tokens=max_tok)
+            rerank_and_summarize(query, docs, style=style, max_tokens=900)
         )
-
-    try:
-        asyncio.run(persist_turn(user_text=query, assistant_text=answer_text))
-    except Exception:
-        pass
-
-    meta = {
-        "style": style,
-        "tickers": tickers,
-        "mcp_attempted": mcp_attempted,
-        "mcp_success": mcp_success,
-        "available_servers": list((servers or {}).keys()),
-        "docs_retrieved": len(snippets) if mcp_success else len(docs),
-        "should_use_mcp": should_use,
-    }
-    return {"answer": answer_text, "snippets": snippets, "meta": meta}
+    
+    return {"answer": answer_text, "snippets": snippets, "meta": {"mcp_success": mcp_success}}
 
 
 @tool(name="answer", description="deliver a comprehensiv answer to a query")
