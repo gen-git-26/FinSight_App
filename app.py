@@ -13,8 +13,8 @@ from tools.mcp_router import route_and_call
 # -----------------------------
 # Theme & assets
 # -----------------------------
-LOGO_PATH = "/workspaces/new_test/data/logo.png"   # FinSight logo
-BOT_ICON_PATH = "/workspaces/new_test/data/bot_icon.png"                            # Agent icon
+LOGO_PATH = "/workspaces/new_test/data/logo.png"
+BOT_ICON_PATH = "/workspaces/new_test/data/bot_icon.png"
 
 PRIMARY_MINT = "#9AF8CC"
 TEXT_MAIN   = "#FFFFFF"   
@@ -159,7 +159,7 @@ if not st.session_state["mcp_started"]:
             else:
                 st.warning(f"{ok}/{total} MCP servers started")
         else:
-            st.info("ℹ No MCP servers configured")
+            st.info("No MCP servers configured")
 
 # -----------------------------
 # Agent button with visible icon
@@ -213,7 +213,7 @@ if prompt:
         mcp_payload = {"error": f"Route error: {e}"}
 
     # Live MCP inspector
-    with st.expander("🔌 Live MCP"):
+    with st.expander("Live MCP", expanded=False):
         def _show_parsed(obj):
             try:
                 import pandas as pd
@@ -294,7 +294,7 @@ if prompt:
             elif display_type == "dict":
                 # Formatted key-value display
                 with st.container(border=True):
-                    st.markdown("###Data Summary")
+                    st.markdown("### Data Summary")
                     st.markdown(txt)
             
             elif display_type == "error":
@@ -305,22 +305,10 @@ if prompt:
                 # Default text display
                 st.markdown(txt)
             
-            # Add metadata section
-            meta = (out or {}).get("meta", {})
-            if meta:
-                with st.expander("Metadata", expanded=False):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.write(f"**MCP Success**: {meta.get('mcp_success', 'N/A')}")
-                        st.write(f"**Display Type**: {meta.get('display_type', 'N/A')}")
-                    with col2:
-                        st.write(f"**Data Source**: {meta.get('available_servers', [])}")
-                        st.write(f"**Is DataFrame**: {meta.get('is_dataframe', False)}")
-            
             # Store message
             st.session_state["messages"].append({"role": "assistant", "content": txt})
 
-            # Sources (if available)
+            # Sources (if available) - REMOVED METADATA SECTION
             snips = (out or {}).get("snippets") or []
             if snips:
                 with st.expander(f"Sources ({len(snips)} snippets)", expanded=False):
@@ -338,4 +326,4 @@ if prompt:
             print(f"[app] Assistant response error: {e}")
             import traceback
             traceback.print_exc()
-            st.session_state["messages"].append({"role": "assistant", "content": f"Error: {e}"})
+            st.session_state["messages"].append({"role": "assistant", "content": f"Error: {e}"})clear
