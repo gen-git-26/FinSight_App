@@ -1,142 +1,329 @@
-# tools/answer.py
+# app.py
 from __future__ import annotations
+import os, json
+import streamlit as st
+import dotenv
+dotenv.load_dotenv()
 
-import re
-import json
-from typing import Dict, Any, List
-
-from agno.tools import tool
+from tools.answer import answer_core
 from mcp_connection.manager import MCPServer
+from mcp_connection.startup import startup_mcp_servers, get_manager
 from tools.mcp_router import route_and_call
-from tools.smart_formatter import _format_data_as_text, _detect_content_type
+
+# -----------------------------
+# Theme & assets
+# -----------------------------
+LOGO_PATH = "/workspaces/new_test/data/logo.png"
+BOT_ICON_PATH = "/workspaces/new_test/data/bot_icon.png"
+
+PRIMARY_MINT = "#9AF8CC"
+TEXT_MAIN   = "#FFFFFF"   
+BG_DARK     = "#0D0F10"
+CARD_DARK   = "#121416"
+BORDER      = "#2A2F33"
+
+st.set_page_config(
+    page_title="FinSight",
+    page_icon=BOT_ICON_PATH,   
+    layout="wide"
+)
+
+# -----------------------------
+# Global CSS
+# -----------------------------
+st.markdown(
+    f"""
+    <style>
+      .stApp {{
+        background: {BG_DARK};
+        color: {TEXT_MAIN};
+      }}
+      header, .block-container {{ padding-top: 0.6rem; }}
+
+      /* cards and chat */
+      .stExpander, .stChatMessage, .stTextInput, .stTextArea {{
+        background: {CARD_DARK} !important;
+        border: 1px solid {BORDER} !important;
+        border-radius: 14px !important;
+        color: {TEXT_MAIN} !important;
+      }}
+
+      /* text user input */
+      .stChatMessage p, .stChatMessage span, .stMarkdown, .stMarkdown p, .stMarkdown span {{
+        color: {TEXT_MAIN} !important;
+      }}
+
+      /* dividers */
+      hr, .stDivider {{ border-color: {BORDER} !important; }}
+
+      /* buttons */
+      .stButton>button {{
+        background: transparent;
+        border: 1px solid {PRIMARY_MINT};
+        color: {TEXT_MAIN};
+        padding: 0.7rem 1rem;
+        border-radius: 12px;
+        font-weight: 600;
+        transition: 120ms ease-in-out;
+      }}
+      .stButton>button:hover {{ 
+        background: rgba(154,248,204,0.08);
+      }}
+
+      /* input */
+      .stTextInput input, .stTextArea textarea {{
+        color: {TEXT_MAIN} !important;
+      }}
+      .stTextInput input::placeholder, .stTextArea textarea::placeholder {{
+        color: #CFD8DC !important;
+      }}
+
+      /* brand subtitle */
+      .brand-sub {{
+        color: #BFEFE0; 
+        margin-bottom: 0.6rem; 
+        font-size: 1.35rem; 
+        font-weight: 700;
+        letter-spacing: .2px;
+      }}
+    
+      /*icon inline fix*/
+      .align-center {{
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        }}
 
 
-def _normalize_mcp_payload(payload: Any) -> tuple[bool, Dict]:
-    """Normalize route_and_call outputs into a dict form."""
-    if isinstance(payload, dict):
-        if payload.get("error"):
-            return False, payload
-        has_content = payload.get("parsed") is not None or bool(payload.get("raw"))
-        return has_content, payload
-    
-    return False, {"error": "Invalid payload"}
+      /* delete streamlit watermark */
+        [data-testid="stImage"] img {{
+        margin: 0 !important; 
+        display: block; 
+        }}
 
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-def _summarize_mcp_payload(norm: Dict) -> tuple[str, str, bool]:
-    """
-    Build a summary from normalized MCP payload with smart formatting.
-    
-    Returns:
-        (answer_text, content_type, is_dataframe)
-    """
-    route = norm.get("route", {}) or {}
-    server = route.get("server", "?")
-    tool = route.get("tool", "?")
-    ticker = route.get("primary_ticker", "?")
-    intent = route.get("intent", "?")
-    
-    parsed = norm.get("parsed")
-    
-    if parsed:
-        # Auto-detect best display format
-        content_type = _detect_content_type(parsed)
-        
-        # DON'T add header for tables - let Streamlit render cleanly
-        if content_type == "table":
-            formatted_text, detected_type, is_df = _format_data_as_text(parsed, content_type)
-            return formatted_text, detected_type, is_df
-        
-        # For non-tables, add header
-        header = f"**Data Source**: {server}/{tool}\n"
-        header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
-        header += f"{'='*60}\n\n"
-        
-        formatted_text, detected_type, is_df = _format_data_as_text(parsed, content_type)
-        return header + formatted_text, detected_type, is_df
-    
-    # Fallback to raw
-    raw = norm.get("raw", "")
-    if isinstance(raw, str) and raw:
-        # Try to parse raw as JSON
-        try:
-            if raw.startswith('[') or raw.startswith('{'):
-                parsed_raw = json.loads(raw)
-                content_type = _detect_content_type(parsed_raw)
-                
-                # Check if it's a table
-                if content_type == "table":
-                    formatted_text, detected_type, is_df = _format_data_as_text(parsed_raw, content_type)
-                    return formatted_text, detected_type, is_df
-                
-                # Non-table: add header
-                header = f"**Data Source**: {server}/{tool}\n"
-                header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
-                header += f"{'='*60}\n\n"
-                
-                formatted_text, detected_type, is_df = _format_data_as_text(parsed_raw, content_type)
-                return header + formatted_text, detected_type, is_df
-        except:
-            pass
-        
-        # Raw text response
-        header = f"**Data Source**: {server}/{tool}\n"
-        header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
-        header += f"{'='*60}\n\n"
-        return header + f"Retrieved {len(raw)} bytes:\n\n{raw[:2000]}", "text", False
-    
-    header = f"**Data Source**: {server}/{tool}\n"
-    header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
-    header += f"{'='*60}\n\n"
-    return header + "No data returned", "error", False
+# -----------------------------
+# Branded header
+# -----------------------------
+col_logo, col_title, col_spacer = st.columns([0.14, 0.86, 0.10], vertical_alignment="center")
+with col_logo:
+    st.image(LOGO_PATH, use_container_width=True)
+with col_title:
+    st.markdown("<h1 style='margin-bottom: 0.1rem;'>See Beyond The Numbers</h1>", unsafe_allow_html=True)
+    st.markdown('<div class="brand-sub">Smart Financial Agent</div>', unsafe_allow_html=True)
 
-
-def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
-    """
-    Answer using MCP with intelligent formatting.
-    Returns formatted text that's optimized for Streamlit display.
-    """
-    print(f"[answer_core] Query: {query[:100]}...")
-    
+# -----------------------------
+# MCP controls (sidebar)
+# -----------------------------
+with st.sidebar:
+    st.image(LOGO_PATH, use_container_width=True)
+    st.subheader("MCP Server Status")
     servers = MCPServer.from_env()
+    manager = get_manager()
     if not servers:
-        return {
-            "answer": "No MCP servers configured.",
-            "snippets": [],
-            "display_type": "error",
-            "meta": {"mcp_attempted": False, "mcp_success": False}
-        }
-    
-    # Call MCP router
-    mcp_payload = route_and_call(query)
-    mcp_success, mcp_norm = _normalize_mcp_payload(mcp_payload)
-    
-    print(f"[answer_core] MCP success: {mcp_success}")
-    
-    if mcp_success:
-        answer_text, display_type, is_dataframe = _summarize_mcp_payload(mcp_norm)
+        st.info("No MCP servers configured. Set MCP_SERVERS in .env")
     else:
-        error_msg = mcp_norm.get("error", "Unknown error")
-        answer_text = f"Could not retrieve data: {error_msg}\n\nTip: Try a more specific query with a ticker symbol (e.g., AAPL, MSFT, SOL-USD)"
-        display_type = "error"
-        is_dataframe = False
-    
-    meta = {
-        "mcp_attempted": True,
-        "mcp_success": mcp_success,
-        "available_servers": list((servers or {}).keys()),
-        "display_type": display_type,
-        "is_dataframe": is_dataframe,
-    }
-    
-    return {
-        "answer": answer_text,
-        "snippets": [],
-        "display_type": display_type,
-        "is_dataframe": is_dataframe,
-        "meta": meta
-    }
+        status = manager.get_server_status()
+        for name, _srv in servers.items():
+            st.write(f"**{name}** {status.get(name, 'Unknown')}")
+        st.divider()
+        if st.button("Restart All"):
+            with st.spinner("Restarting servers..."):
+                manager.stop_all_servers()
+                st.session_state["startup_results"] = startup_mcp_servers()
+            st.rerun()
 
+# -----------------------------
+# Session state
+# -----------------------------
+if "mcp_started" not in st.session_state:
+    st.session_state["mcp_started"] = False
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
 
-@tool(name="answer", description="Get financial data from MCP servers with smart formatting")
-def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
-    return answer_core(query, ticker, style)
+# Start MCP servers once
+if not st.session_state["mcp_started"]:
+    with st.spinner("Starting MCP servers..."):
+        results = startup_mcp_servers()
+        st.session_state["mcp_started"] = True
+        st.session_state["startup_results"] = results
+        if results:
+            ok, total = sum(results.values()), len(results)
+            if ok == total:
+                st.success(f"All {ok}/{total} MCP servers started successfully!")
+            else:
+                st.warning(f"{ok}/{total} MCP servers started")
+        else:
+            st.info("No MCP servers configured")
+
+# -----------------------------
+# Agent button with visible icon
+# -----------------------------
+agent_col1, agent_col2 = st.columns([0.06, 0.94], vertical_alignment="center")
+with agent_col1:
+    st.markdown(
+        """
+        <div style='display:flex; align-items:center; justify-content:center; height:100%;'>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.image(BOT_ICON_PATH, width=60)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with agent_col2:
+    run_agent = st.button("Run FinSight Agent", use_container_width=True)
+
+if run_agent:
+    st.session_state["messages"].append({"role": "user", "content": "Ask me anything..."})
+
+# -----------------------------
+# Chat history (with custom assistant avatar)
+# -----------------------------
+for m in st.session_state["messages"]:
+    if m["role"] == "assistant":
+        with st.chat_message("assistant", avatar=BOT_ICON_PATH):
+            st.markdown(m["content"])
+    elif m["role"] == "user":
+        with st.chat_message("user"):
+            st.markdown(m["content"])
+    else:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+# -----------------------------
+# Chat input
+# -----------------------------
+prompt = st.chat_input("Ask about stocks, crypto, options, or fundamentals...")
+
+if prompt:
+    # Show user message
+    st.session_state["messages"].append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Call MCP router directly for a raw view
+    try:
+        mcp_payload = route_and_call(prompt)
+    except Exception as e:
+        mcp_payload = {"error": f"Route error: {e}"}
+
+    # Live MCP inspector
+    with st.expander("Live MCP", expanded=False):
+        def _show_parsed(obj):
+            try:
+                import pandas as pd
+            except Exception:
+                pd = None
+            if isinstance(obj, list) and obj and isinstance(obj[0], dict) and pd is not None:
+                st.dataframe(pd.DataFrame(obj))
+            elif isinstance(obj, (dict, list)):
+                st.json(obj)
+            else:
+                st.code(str(obj), language="text")
+
+        if isinstance(mcp_payload, dict):
+            if mcp_payload.get("error"):
+                st.error(mcp_payload["error"])
+            else:
+                st.subheader("Route")
+                st.json(mcp_payload.get("route", {}))
+                st.subheader("Parsed")
+                if mcp_payload.get("parsed") is not None:
+                    _show_parsed(mcp_payload.get("parsed"))
+                else:
+                    st.info("No JSON payload. See Raw below.")
+                st.subheader("Raw")
+                st.code(mcp_payload.get("raw", ""), language="json")
+        else:
+            raw = mcp_payload
+            st.subheader("Raw")
+            st.code(raw if isinstance(raw, str) else str(raw), language="text")
+            try:
+                if isinstance(raw, str):
+                    start = min([i for i in [raw.find("["), raw.find("{")] if i != -1] or [None])
+                    if start is not None:
+                        parsed = json.loads(raw[start:])
+                        st.subheader("Parsed (best effort)")
+                        _show_parsed(parsed)
+            except Exception:
+                pass
+
+    # Final assistant answer (shows with bot avatar)
+    with st.chat_message("assistant", avatar=BOT_ICON_PATH):
+        try:
+            out = answer_core(prompt)
+            txt = (out or {}).get("answer", "")
+            display_type = (out or {}).get("display_type", "text")
+            is_dataframe = (out or {}).get("is_dataframe", False)
+            
+            # Smart display based on content type
+            if is_dataframe and display_type == "table":
+                # Parse and display as interactive table
+                try:
+                    import pandas as pd
+                    data = json.loads(txt)
+                    if isinstance(data, str):
+                        data = json.loads(data)
+                    
+                    df = pd.DataFrame(json.loads(data)) if isinstance(data, str) else pd.DataFrame(data)
+                    
+                    # Format columns nicely
+                    with st.container(border=True):
+                        st.markdown("### Results")
+                        st.dataframe(
+                            df,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                col: st.column_config.NumberColumn(
+                                    format="$%.2f" if "price" in col.lower() else "%.4f"
+                                )
+                                for col in df.columns
+                                if df[col].dtype in ['float64', 'int64']
+                            }
+                        )
+                except Exception as e:
+                    print(f"[app] Dataframe render error: {e}")
+                    st.markdown(txt)
+            
+            elif display_type == "dict":
+                # Formatted key-value display
+                with st.container(border=True):
+                    st.markdown("### Data Summary")
+                    st.markdown(txt)
+            
+            elif display_type == "error":
+                # Error display
+                st.error(txt)
+            
+            else:
+                # Default text display
+                st.markdown(txt)
+            
+            # Store message
+            st.session_state["messages"].append({"role": "assistant", "content": txt})
+
+            # Sources (if available) - REMOVED METADATA SECTION
+            snips = (out or {}).get("snippets") or []
+            if snips:
+                with st.expander(f"Sources ({len(snips)} snippets)", expanded=False):
+                    for i, s in enumerate(snips[:10], 1):
+                        sym = s.get("symbol") or "N/A"
+                        dt_ = s.get("date") or "N/A"
+                        src = s.get("source") or "unknown"
+                        prev = (s.get("text") or "")[:200]
+                        st.write(f"**{i}.** `{src}` | **{sym}** ({dt_})")
+                        st.write(f"_{prev}..._")
+                        st.divider()
+        
+        except Exception as e:
+            st.error(f"Error: {e}")
+            print(f"[app] Assistant response error: {e}")
+            import traceback
+            traceback.print_exc()
+            st.session_state["messages"].append({"role": "assistant", "content": f"Error: {e}"})
