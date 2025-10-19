@@ -326,4 +326,4 @@ if prompt:
             print(f"[app] Assistant response error: {e}")
             import traceback
             traceback.print_exc()
-            st.session_state["messages"].append({"role": "assistant", "content": f"Error: {e}"})clear
+            st.session_state["messages"].append({"role": "assistant", "content": f"Error: {e}"})
