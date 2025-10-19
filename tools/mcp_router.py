@@ -1,34 +1,18 @@
-# tools/mcp_router.py
+# tools/mcp_router.py 
 from __future__ import annotations
 
 import re
 import json
-import asyncio
-from functools import lru_cache
-from datetime import datetime, date
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 
 from agno.tools import tool
 from rag.fusion import fuse
 from mcp_connection.manager import MCPManager, MCPServer
-from tools.async_utils import run_async_safe, sync_callable
+from tools.async_utils import run_async_safe
 from tools.query_parser import ParsedQuery, parse_query_with_llm
-from tools.time_parser import parse_time_range_to_days
+from tools.crypto_resolver import get_crypto_resolver, is_crypto_query
 
 # Constants
-_TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3}|-[A-Z0-9]{1,6})?\b")
-_STOP = {
-    "USD", "USDT", "USDC", "PE", "EV", "EPS", "ETF",
-    "AND", "OR", "THE", "A", "AN", "IS", "ARE", "FOR", "TO", "OF", "IN",
-}
-
-_CRYPTO_KEYWORDS = {
-    "CRYPTO", "BITCOIN", "BTC", "ETH", "ETHEREUM", "COIN", "TOKEN", 
-    "BLOCKCHAIN", "DEFI", "XRP", "DOGE", "LTC", "SOL", "ADA"
-}
-
-VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
-
 KNOWN_TOOLSETS: Dict[str, List[str]] = {
     "yfinance": [
         "get_stock_info", "get_historical_stock_prices", "get_yahoo_finance_news",
@@ -41,28 +25,12 @@ KNOWN_TOOLSETS: Dict[str, List[str]] = {
     ]
 }
 
+VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
+
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
-
-def _tokenize_words(text: str) -> List[str]:
-    return re.findall(r"[A-Za-z0-9\.\-]+", (text or ""))
-
-
-def _extract_regex_tickers(text: str) -> List[str]:
-    matches = _TICKER_RE.findall((text or "").upper())
-    return [m for m in matches if m not in _STOP]
-
-
-def _detect_crypto_intent(query: str) -> bool:
-    q_upper = (query or "").upper()
-    if any(k in q_upper for k in _CRYPTO_KEYWORDS):
-        return True
-    if re.search(r"\b[A-Z0-9]{2,10}-USD\b", q_upper):
-        return True
-    return False
-
 
 def _safe_json_loads(txt: str) -> Optional[Dict]:
     try:
@@ -91,30 +59,52 @@ def _normalize_tool_name(raw: Any) -> Optional[str]:
     return s or None
 
 
+def _parse_mcp_response(raw: str) -> tuple[Optional[Dict], str]:
+    """
+    Try to extract structured data from MCP response.
+    Returns: (parsed_dict_or_none, cleaned_text)
+    """
+    if not isinstance(raw, str):
+        return None, str(raw)
+    
+    # Try 1: Direct JSON
+    parsed = _safe_json_loads(raw)
+    if parsed:
+        return parsed, raw
+    
+    # Try 2: JSON within text (extract from [...] or {...})
+    for pattern in [r'\[.*\]', r'\{.*\}']:
+        match = re.search(pattern, raw, re.DOTALL)
+        if match:
+            extracted = match.group(0)
+            parsed = _safe_json_loads(extracted)
+            if parsed:
+                return parsed, extracted
+    
+    # Try 3: Parse error messages
+    if "Error:" in raw or "error:" in raw.lower():
+        return None, raw
+    
+    return None, raw
+
+
 # ============================================================================
-# TOOL LISTING (FIXED for async)
+# TOOL LISTING
 # ============================================================================
 
 def _list_server_tools_sync(manager: MCPManager, server: str) -> Dict[str, dict]:
-    """
-    FIXED: Safely list tools from server, handling both sync and async.
-    Never call asyncio.run() here - caller handles async context.
-    """
+    """List available tools from server."""
     try:
-        # Try sync method first
-        if hasattr(manager, "list_tools_sync") and callable(getattr(manager, "list_tools_sync")):
+        if hasattr(manager, "list_tools_sync"):
             data = manager.list_tools_sync(server)
         else:
-            # If no sync method, return known tools as fallback
-            print(f"[_list_server_tools_sync] No list_tools_sync method, using fallback")
+            print(f"[mcp_router] No list_tools_sync, using fallback")
             data = {"tools": [{"name": n} for n in KNOWN_TOOLSETS.get(server, [])]}
     
     except Exception as e:
-        print(f"[_list_server_tools_sync] Error listing tools from {server}: {e}")
-        # Fallback to known toolsets
+        print(f"[mcp_router] Error listing tools: {e}")
         data = {"tools": [{"name": n} for n in KNOWN_TOOLSETS.get(server, [])]}
     
-    # Parse the response
     tools: Dict[str, dict] = {}
     raw_tools = []
     
@@ -148,8 +138,9 @@ def _list_server_tools_sync(manager: MCPManager, server: str) -> Dict[str, dict]
 # ============================================================================
 
 def _pick_tool_by_intent(intent: str, tools_map: Dict[str, dict], server: str) -> Optional[str]:
+    """Pick tool based on intent."""
     intent_map = {
-        "price_quote": ["get_current_stock_price", "get_stock_info"],
+        "price_quote": ["get_current_stock_price", "get_current_crypto_price", "get_stock_info"],
         "news": ["get_yahoo_finance_news", "get_company_news"],
         "analysis": ["get_stock_info", "get_financial_statement"],
         "fundamentals": ["get_financial_statement", "get_balance_sheets", "get_income_statements"],
@@ -157,7 +148,7 @@ def _pick_tool_by_intent(intent: str, tools_map: Dict[str, dict], server: str) -
         "recommendation": ["get_recommendations"],
         "dividend": ["get_stock_actions"],
         "insider": ["get_holder_info"],
-        "historical": ["get_historical_stock_prices"],
+        "historical": ["get_historical_stock_prices", "get_historical_crypto_prices"],
     }
     
     candidates = intent_map.get(intent, [])
@@ -172,13 +163,6 @@ def _pick_tool_by_intent(intent: str, tools_map: Dict[str, dict], server: str) -
 # ARGS BUILDING
 # ============================================================================
 
-def _parse_yyyy_mm_dd(d: str) -> Optional[date]:
-    try:
-        return datetime.strptime(d, "%Y-%m-%d").date()
-    except Exception:
-        return None
-
-
 def _build_args_from_parsed_query(
     manager: MCPManager,
     server: str,
@@ -191,11 +175,24 @@ def _build_args_from_parsed_query(
     
     args = {}
     
-    # Ticker/symbol
-    if "ticker" in props and parsed_query.primary_ticker:
-        args["ticker"] = parsed_query.primary_ticker
-    elif "symbol" in props and parsed_query.primary_ticker:
-        args["symbol"] = parsed_query.primary_ticker
+    # Resolve ticker with crypto support
+    ticker = parsed_query.primary_ticker or ""
+    
+    # Check if crypto
+    crypto_resolver = get_crypto_resolver()
+    crypto_result = crypto_resolver.resolve(ticker or parsed_query.raw_intent, use_cache_only=True)
+    
+    if crypto_result['found']:
+        ticker = crypto_result['symbol']
+        # Add -USD suffix for crypto in financial-datasets
+        if server == "financial-datasets" and not ticker.endswith("-USD"):
+            ticker = f"{ticker}-USD"
+    
+    # Set ticker/symbol
+    if "ticker" in props and ticker:
+        args["ticker"] = ticker
+    elif "symbol" in props and ticker:
+        args["symbol"] = ticker
     
     # Time windows
     if "period" in props:
@@ -218,18 +215,10 @@ def _build_args_from_parsed_query(
         else:
             args["financial_type"] = "income_stmt"
     
-    # Options expiration
+    # Options
     if tool.get("name") == "get_option_chain":
         if "option_type" in props:
             args["option_type"] = parsed_query.options_type or "calls"
-        if "expiration_date" in props and parsed_query.primary_ticker:
-            try:
-                raw = _call_tool_blocking(manager, server, "get_option_expiration_dates", {"ticker": parsed_query.primary_ticker})
-                dates = _safe_json_loads(raw)
-                if isinstance(dates, list) and dates:
-                    args["expiration_date"] = dates[0]
-            except Exception:
-                pass
     
     return args
 
@@ -239,17 +228,58 @@ def _build_args_from_parsed_query(
 # ============================================================================
 
 def _call_tool_blocking(manager: MCPManager, server: str, tool_name: str, args: dict) -> str:
-    """Call tool synchronously (blocks)."""
+    """Call tool synchronously."""
     try:
         if hasattr(manager, "call_sync") and callable(getattr(manager, "call_sync")):
             return manager.call_sync(server, tool_name, args)
         else:
-            print(f"[_call_tool_blocking] No call_sync method, trying async...")
-            # Fallback - shouldn't reach here in production
+            print(f"[mcp_router] No call_sync method")
             return f"Tool call failed: {tool_name}"
     except Exception as e:
-        print(f"[_call_tool_blocking] Error calling {tool_name}: {e}")
+        print(f"[mcp_router] Error calling {tool_name}: {e}")
         return f"Tool call error: {str(e)}"
+
+
+# ============================================================================
+# SERVER SELECTION (IMPROVED with Crypto Detection)
+# ============================================================================
+
+def _pick_server(parsed_query: "ParsedQuery", available_servers: Dict[str, MCPServer]) -> Optional[str]:
+    """
+    Pick best server with dynamic crypto detection.
+    
+    Priority:
+    1. Crypto detection → financial-datasets (if available)
+    2. Specific intents (options, fundamentals) → yfinance
+    3. Default → yfinance, then financial-datasets
+    """
+    # Try to detect crypto from query or ticker
+    crypto_resolver = get_crypto_resolver()
+    
+    query_text = parsed_query.primary_ticker or parsed_query.raw_intent
+    crypto_result = crypto_resolver.resolve(query_text, use_cache_only=True)
+    
+    is_crypto = crypto_result['found']
+    
+    if is_crypto:
+        print(f"🪙 [mcp_router] Crypto detected: {crypto_result['symbol']} ({crypto_result['name']}) from {crypto_result['source']}")
+        
+        if "financial-datasets" in available_servers:
+            return "financial-datasets"
+        
+        # Fallback if financial-datasets not available
+        if "yfinance" in available_servers:
+            print(f"⚠️ [mcp_router] financial-datasets unavailable, trying yfinance")
+            return "yfinance"
+    
+    # Non-crypto: prefer yfinance for better coverage
+    if "yfinance" in available_servers:
+        return "yfinance"
+    
+    if "financial-datasets" in available_servers:
+        return "financial-datasets"
+    
+    return next(iter(available_servers)) if available_servers else None
 
 
 # ============================================================================
@@ -258,23 +288,22 @@ def _call_tool_blocking(manager: MCPManager, server: str, tool_name: str, args: 
 
 def route_and_call(query: str) -> Dict[str, Any]:
     """
-    Route a query to the best MCP server/tool and call it.
+    Route query to best MCP server/tool and call it.
     
     Returns:
         {
-            "route": {"server": ..., "tool": ..., "tickers": ...},
+            "route": {"server": ..., "tool": ..., "primary_ticker": ...},
             "parsed": parsed_json_or_none,
             "raw": raw_response_string,
             "error": error_message_or_none
         }
     """
     try:
-        # Step 1: Parse query with LLM
+        # Step 1: Parse query
         parsed_query = parse_query_with_llm(query)
-        
         print(f"[route_and_call] Parsed: ticker={parsed_query.primary_ticker}, intent={parsed_query.intent}")
         
-        # Step 2: Check available servers
+        # Step 2: Check servers
         available_servers = MCPServer.from_env()
         if not available_servers:
             return {"error": "No MCP servers configured", "route": {}}
@@ -283,22 +312,22 @@ def route_and_call(query: str) -> Dict[str, Any]:
         manager = MCPManager()
         server = _pick_server(parsed_query, available_servers)
         if not server:
-            return {"error": f"No suitable server found. Available: {list(available_servers.keys())}", "route": {}}
+            return {"error": f"No suitable server. Available: {list(available_servers.keys())}", "route": {}}
         
         print(f"[route_and_call] Selected server: {server}")
         
         # Step 4: List and pick tool
         tools_map = _list_server_tools_sync(manager, server)
         if not tools_map:
-            return {"error": f"No tools found in server: {server}", "route": {}}
+            return {"error": f"No tools in {server}", "route": {}}
         
         tool_name = _pick_tool_by_intent(parsed_query.intent, tools_map, server)
         if not tool_name:
-            return {"error": f"No tool matching intent: {parsed_query.intent}", "route": {}}
+            return {"error": f"No tool for intent: {parsed_query.intent}", "route": {}}
         
         print(f"[route_and_call] Selected tool: {tool_name}")
         
-        # Step 5: Build arguments
+        # Step 5: Build args
         tool_obj = tools_map.get(tool_name, {"name": tool_name})
         args = _build_args_from_parsed_query(manager, server, tool_obj, parsed_query)
         
@@ -309,17 +338,17 @@ def route_and_call(query: str) -> Dict[str, Any]:
         
         if requires_ticker and not (args.get("ticker") or args.get("symbol")):
             return {
-                "error": "Could not resolve a ticker from the query. Please specify a symbol (e.g., AAPL or BTC-USD).",
+                "error": "Could not resolve ticker. Please specify (e.g., AAPL or SOL).",
                 "route": {"server": server, "tool": tool_name}
             }
         
-        print(f"[route_and_call] Calling with args: {args}")
+        print(f"[route_and_call] Args: {args}")
         
         # Step 6: Call tool
         result = _call_tool_blocking(manager, server, tool_name, args)
         
-        # Step 7: Parse result
-        parsed_result = _safe_json_loads(result)
+        # Step 7: Parse result WITH robust fallback
+        parsed_result, cleaned_raw = _parse_mcp_response(result)
         
         return {
             "route": {
@@ -329,7 +358,7 @@ def route_and_call(query: str) -> Dict[str, Any]:
                 "intent": parsed_query.intent,
             },
             "parsed": parsed_result,
-            "raw": result,
+            "raw": cleaned_raw,
             "error": None
         }
         
@@ -340,77 +369,25 @@ def route_and_call(query: str) -> Dict[str, Any]:
         return {"error": f"Routing failed: {str(e)}", "route": {}}
 
 
-def _pick_server(parsed_query: "ParsedQuery", available_servers: Dict[str, MCPServer]) -> Optional[str]:
-    """
-    Pick best server based on parsed query.
-    
-    Rules:
-    1. Crypto intent (BTC, ETH, -USD suffix) → financial-datasets
-    2. Options/fundamentals → yfinance
-    3. Stock price/historical → yfinance (better coverage)
-    4. Default → yfinance
-    """
-    primary_ticker = (parsed_query.primary_ticker or "").upper()
-    
-    # Crypto symbols (well-known)
-    crypto_symbols = {"BTC", "ETH", "XRP", "DOGE", "LTC", "SOL", "ADA", "MATIC", "AVAX", "LINK", "UNI", "AAVE", "ATOM"}
-    
-    # Rule 1: Crypto detection
-    is_crypto = (
-        primary_ticker.endswith("-USD") or 
-        primary_ticker in crypto_symbols
-    )
-    
-    if is_crypto:
-        if "financial-datasets" in available_servers:
-            print(f"[_pick_server] Crypto detected ({primary_ticker}) → financial-datasets")
-            return "financial-datasets"
-        # Fallback to yfinance if financial-datasets unavailable
-        if "yfinance" in available_servers:
-            print(f"[_pick_server] Crypto but financial-datasets unavailable, using yfinance")
-            return "yfinance"
-    
-    # Rule 2: Options/fundamentals prefer yfinance
-    if parsed_query.intent in ("options", "fundamentals", "recommendation", "dividend", "insider"):
-        if "yfinance" in available_servers:
-            print(f"[_pick_server] Intent {parsed_query.intent} → yfinance")
-            return "yfinance"
-    
-    # Rule 3: Default preference order (yfinance better coverage)
-    if "yfinance" in available_servers:
-        print(f"[_pick_server] Default → yfinance")
-        return "yfinance"
-    if "financial-datasets" in available_servers:
-        print(f"[_pick_server] yfinance unavailable → financial-datasets")
-        return "financial-datasets"
-    
-    # Last resort
-    result = next(iter(available_servers)) if available_servers else None
-    print(f"[_pick_server] Last resort → {result}")
-    return result
-
-
 # ============================================================================
 # AGNO TOOL
 # ============================================================================
 
 @tool(
     name="mcp_auto",
-    description="Auto-router for MCP servers. Intelligently routes queries to the best financial data source."
+    description="Auto-router for MCP servers with crypto detection"
 )
 @fuse(tool_name="mcp-auto", doc_type="mcp")
 def mcp_auto(query: str) -> str:
     """Entry point for agent."""
     result = route_and_call(query)
     
-    # If error, return error message
     if result.get("error"):
         return f"Error: {result['error']}"
     
-    # Return raw response (can be parsed later)
     raw = result.get("raw", "")
     route_info = result.get("route", {})
     
-    info_str = f"[Route: {route_info.get('server')}/{route_info.get('tool')} | Ticker: {route_info.get('primary_ticker')} | Intent: {route_info.get('intent')}]"
+    info_str = f"[{route_info.get('server')}/{route_info.get('tool')} | {route_info.get('primary_ticker')} | {route_info.get('intent')}]"
     
     return f"{info_str}\n\n{raw}"

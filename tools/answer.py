@@ -1,4 +1,4 @@
-# tools/answer.py - MCP Only with Full Data Display
+# tools/answer.py
 from __future__ import annotations
 
 import re
@@ -8,6 +8,7 @@ from typing import Dict, Any, List
 from agno.tools import tool
 from mcp_connection.manager import MCPServer
 from tools.mcp_router import route_and_call
+from tools.smart_formatter import _format_data_as_text, _detect_content_type
 
 
 def _normalize_mcp_payload(payload: Any) -> tuple[bool, Dict]:
@@ -21,119 +22,55 @@ def _normalize_mcp_payload(payload: Any) -> tuple[bool, Dict]:
     return False, {"error": "Invalid payload"}
 
 
-def _format_data_as_text(parsed: Any, max_chars: int = 3000) -> str:
-    """Format parsed data as readable text for display."""
+def _summarize_mcp_payload(norm: Dict) -> tuple[str, str, bool]:
+    """
+    Build a summary from normalized MCP payload with smart formatting.
     
-    # List of records (e.g., options chain, financial statements)
-    if isinstance(parsed, list) and parsed:
-        if isinstance(parsed[0], dict):
-            lines = []
-            lines.append(f"Retrieved {len(parsed)} records:\n")
-            
-            # Show first 5 records with all fields
-            for i, record in enumerate(parsed[:5], 1):
-                lines.append(f"Record {i}:")
-                for key, value in record.items():
-                    # Format value nicely
-                    if isinstance(value, (int, float)):
-                        if isinstance(value, float):
-                            val_str = f"{value:,.2f}" if abs(value) > 0.01 else f"{value}"
-                        else:
-                            val_str = f"{value:,}"
-                    else:
-                        val_str = str(value)
-                    lines.append(f"  {key}: {val_str}")
-                lines.append("")
-            
-            if len(parsed) > 5:
-                lines.append(f"... and {len(parsed) - 5} more records")
-            
-            text = "\n".join(lines)
-            return text[:max_chars]
-        else:
-            return "\n".join(str(item) for item in parsed[:20])
-    
-    # Single dict (e.g., stock info)
-    if isinstance(parsed, dict):
-        lines = []
-        lines.append(f"Data Summary ({len(parsed)} fields):\n")
-        
-        # Show key metrics (common financial fields)
-        key_fields = [
-            "currentPrice", "regularMarketPrice", "fiftyTwoWeekHigh", "fiftyTwoWeekLow",
-            "marketCap", "volume", "averageVolume", "beta", "pe", "trailingPE", "forwardPE",
-            "dividend", "yield", "earnings", "eps", "epsTrailingTwelveMonths",
-            "priceToBook", "priceToSalesTrailing12Months", "debtToEquity", "returnOnAssets",
-            "shortName", "longName", "sector", "industry", "website"
-        ]
-        
-        for field in key_fields:
-            if field in parsed:
-                value = parsed[field]
-                # Format numbers nicely
-                if isinstance(value, (int, float)):
-                    if isinstance(value, float) and value > 100:
-                        val_str = f"{value:,.2f}"
-                    elif isinstance(value, float):
-                        val_str = f"{value:.4f}"
-                    else:
-                        val_str = f"{value:,}"
-                else:
-                    val_str = str(value)
-                lines.append(f"  {field}: {val_str}")
-        
-        # Show any remaining important fields
-        lines.append("\nOther fields:")
-        shown_fields = set(key_fields)
-        for key in sorted(parsed.keys())[:20]:
-            if key not in shown_fields and not key.startswith("_"):
-                value = parsed[key]
-                if isinstance(value, (int, float, str, bool)):
-                    if isinstance(value, float):
-                        val_str = f"{value:.2f}" if abs(value) > 0.01 else str(value)
-                    else:
-                        val_str = str(value)
-                    lines.append(f"  {key}: {val_str}")
-        
-        text = "\n".join(lines)
-        return text[:max_chars]
-    
-    # Fallback
-    return json.dumps(parsed, indent=2, ensure_ascii=False)[:max_chars]
-
-
-def _summarize_mcp_payload(norm: Dict) -> str:
-    """Build a summary from normalized MCP payload with full data."""
+    Returns:
+        (answer_text, content_type, is_dataframe)
+    """
     route = norm.get("route", {}) or {}
     server = route.get("server", "?")
     tool = route.get("tool", "?")
     ticker = route.get("primary_ticker", "?")
     intent = route.get("intent", "?")
     
-    header = f"Data from {server}/{tool}\n🔹 Symbol: {ticker} | Intent: {intent}\n{'='*60}\n"
+    header = f"📊 **Data Source**: {server}/{tool}\n"
+    header += f"🔹 **Symbol**: {ticker} | **Intent**: {intent}\n"
+    header += f"{'='*60}\n\n"
     
     parsed = norm.get("parsed")
     
     if parsed:
-        data_text = _format_data_as_text(parsed)
-        return header + data_text
+        # Auto-detect best display format
+        content_type = _detect_content_type(parsed)
+        formatted_text, detected_type, is_df = _format_data_as_text(parsed, content_type)
+        
+        return header + formatted_text, detected_type, is_df
     
     # Fallback to raw
     raw = norm.get("raw", "")
     if isinstance(raw, str) and raw:
-        return header + f"Retrieved {len(raw)} bytes of data:\n{raw[:2000]}"
+        # Try to parse raw as JSON
+        try:
+            if raw.startswith('[') or raw.startswith('{'):
+                parsed_raw = json.loads(raw)
+                content_type = _detect_content_type(parsed_raw)
+                formatted_text, detected_type, is_df = _format_data_as_text(parsed_raw, content_type)
+                return header + formatted_text, detected_type, is_df
+        except:
+            pass
+        
+        # Raw text response
+        return header + f"Retrieved {len(raw)} bytes:\n\n{raw[:2000]}", "text", False
     
-    return header + "No data returned"
+    return header + " No data returned", "error", False
 
-
-# ============================================================================
-# MAIN ANSWER FUNCTION - MCP ONLY
-# ============================================================================
 
 def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     """
-    Answer using MCP ONLY with full data display.
-    For all financial queries, route to the best MCP server/tool.
+    Answer using MCP with intelligent formatting.
+    Returns formatted text that's optimized for Streamlit display.
     """
     print(f"[answer_core] Query: {query[:100]}...")
     
@@ -142,6 +79,7 @@ def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]
         return {
             "answer": "No MCP servers configured.",
             "snippets": [],
+            "display_type": "error",
             "meta": {"mcp_attempted": False, "mcp_success": False}
         }
     
@@ -152,20 +90,30 @@ def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]
     print(f"[answer_core] MCP success: {mcp_success}")
     
     if mcp_success:
-        answer_text = _summarize_mcp_payload(mcp_norm)
+        answer_text, display_type, is_dataframe = _summarize_mcp_payload(mcp_norm)
     else:
         error_msg = mcp_norm.get("error", "Unknown error")
-        answer_text = f"Could not retrieve data: {error_msg}\n\n💡 Try a more specific query with a ticker symbol (e.g., AAPL, MSFT, BTC-USD)"
+        answer_text = f"Could not retrieve data: {error_msg}\n\n💡 **Tip**: Try a more specific query with a ticker symbol (e.g., AAPL, MSFT, SOL-USD)"
+        display_type = "error"
+        is_dataframe = False
     
     meta = {
         "mcp_attempted": True,
         "mcp_success": mcp_success,
         "available_servers": list((servers or {}).keys()),
+        "display_type": display_type,
+        "is_dataframe": is_dataframe,
     }
     
-    return {"answer": answer_text, "snippets": [], "meta": meta}
+    return {
+        "answer": answer_text,
+        "snippets": [],
+        "display_type": display_type,
+        "is_dataframe": is_dataframe,
+        "meta": meta
+    }
 
 
-@tool(name="answer", description="Get financial data from MCP servers")
+@tool(name="answer", description="Get financial data from MCP servers with smart formatting")
 def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     return answer_core(query, ticker, style)

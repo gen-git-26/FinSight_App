@@ -258,20 +258,84 @@ if prompt:
         try:
             out = answer_core(prompt)
             txt = (out or {}).get("answer", "")
-            st.markdown(txt if txt else "*No answer text returned*")
+            display_type = (out or {}).get("display_type", "text")
+            is_dataframe = (out or {}).get("is_dataframe", False)
+            
+            # Smart display based on content type
+            if is_dataframe and display_type == "table":
+                # Parse and display as interactive table
+                try:
+                    import pandas as pd
+                    data = json.loads(txt)
+                    if isinstance(data, str):
+                        data = json.loads(data)
+                    
+                    df = pd.DataFrame(json.loads(data)) if isinstance(data, str) else pd.DataFrame(data)
+                    
+                    # Format columns nicely
+                    with st.container(border=True):
+                        st.markdown("### Results")
+                        st.dataframe(
+                            df,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                col: st.column_config.NumberColumn(
+                                    format="$%.2f" if "price" in col.lower() else "%.4f"
+                                )
+                                for col in df.columns
+                                if df[col].dtype in ['float64', 'int64']
+                            }
+                        )
+                except Exception as e:
+                    print(f"[app] Dataframe render error: {e}")
+                    st.markdown(txt)
+            
+            elif display_type == "dict":
+                # Formatted key-value display
+                with st.container(border=True):
+                    st.markdown("###Data Summary")
+                    st.markdown(txt)
+            
+            elif display_type == "error":
+                # Error display
+                st.error(txt)
+            
+            else:
+                # Default text display
+                st.markdown(txt)
+            
+            # Add metadata section
+            meta = (out or {}).get("meta", {})
+            if meta:
+                with st.expander("Metadata", expanded=False):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**MCP Success**: {meta.get('mcp_success', 'N/A')}")
+                        st.write(f"**Display Type**: {meta.get('display_type', 'N/A')}")
+                    with col2:
+                        st.write(f"**Data Source**: {meta.get('available_servers', [])}")
+                        st.write(f"**Is DataFrame**: {meta.get('is_dataframe', False)}")
+            
+            # Store message
             st.session_state["messages"].append({"role": "assistant", "content": txt})
 
+            # Sources (if available)
             snips = (out or {}).get("snippets") or []
             if snips:
-                with st.expander(f"Sources Used ({len(snips)} snippets)"):
+                with st.expander(f"Sources ({len(snips)} snippets)", expanded=False):
                     for i, s in enumerate(snips[:10], 1):
                         sym = s.get("symbol") or "N/A"
                         dt_ = s.get("date") or "N/A"
                         src = s.get("source") or "unknown"
                         prev = (s.get("text") or "")[:200]
-                        st.write(f"**{i}.** [{src}] **{sym}** ({dt_})")
+                        st.write(f"**{i}.** `{src}` | **{sym}** ({dt_})")
                         st.write(f"_{prev}..._")
                         st.divider()
+        
         except Exception as e:
             st.error(f"Error: {e}")
+            print(f"[app] Assistant response error: {e}")
+            import traceback
+            traceback.print_exc()
             st.session_state["messages"].append({"role": "assistant", "content": f"Error: {e}"})
