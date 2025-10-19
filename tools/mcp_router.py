@@ -17,10 +17,7 @@ from tools.query_parser import parse_query_simple, ParsedQuery
 # ============================================================================
 
 def _extract_date_from_query(query: str) -> Optional[str]:
-    """
-    Extract explicit date from query.
-    Formats: YYYY-MM-DD, MM-DD-YYYY, MM/DD/YYYY
-    """
+    """Extract explicit date from query."""
     patterns = [
         r'(\d{4}-\d{2}-\d{2})',  # YYYY-MM-DD
         r'(\d{2}/\d{2}/\d{4})',  # MM/DD/YYYY
@@ -31,7 +28,6 @@ def _extract_date_from_query(query: str) -> Optional[str]:
         match = re.search(pattern, query)
         if match:
             date_str = match.group(1)
-            # Normalize to YYYY-MM-DD
             try:
                 if '/' in date_str:
                     parts = date_str.split('/')
@@ -48,29 +44,19 @@ def _extract_date_from_query(query: str) -> Optional[str]:
 
 
 def _calculate_next_monthly_expiration() -> str:
-    """
-    Calculate next monthly options expiration (3rd Friday).
-    Always returns a FUTURE date.
-    """
+    """Calculate next monthly options expiration (3rd Friday)."""
     today = datetime.now()
+    year, month = today.year, today.month
     
-    # Try current month first
-    year = today.year
-    month = today.month
-    
-    # Find 3rd Friday of current month
     first_day = datetime(year, month, 1)
-    # Find first Friday (weekday 4)
     days_to_friday = (4 - first_day.weekday()) % 7
     first_friday = first_day + timedelta(days=days_to_friday)
     third_friday = first_friday + timedelta(weeks=2)
     
-    # If 3rd Friday already passed, get next month
     if third_friday < today:
         month += 1
         if month > 12:
-            month = 1
-            year += 1
+            month, year = 1, year + 1
         
         first_day = datetime(year, month, 1)
         days_to_friday = (4 - first_day.weekday()) % 7
@@ -78,7 +64,7 @@ def _calculate_next_monthly_expiration() -> str:
         third_friday = first_friday + timedelta(weeks=2)
     
     result = third_friday.strftime('%Y-%m-%d')
-    print(f"[mcp_router] Calculated next expiration: {result}")
+    print(f"[mcp_router] Calculated expiration: {result}")
     return result
 
 
@@ -88,13 +74,9 @@ def _is_crypto(ticker: Optional[str]) -> bool:
 
 
 def _match_tool_dynamic(intent: str, available_tools: List[str], is_crypto: bool) -> Optional[str]:
-    """
-    Match intent to tool using flexible patterns.
-    Works with ANY MCP server dynamically.
-    """
+    """Match intent to tool using patterns."""
     tools_lower = {t.lower(): t for t in available_tools}
     
-    # Define flexible patterns
     patterns_by_intent = {
         'price': [
             r'current.*crypto.*price' if is_crypto else r'current.*stock.*price',
@@ -105,28 +87,22 @@ def _match_tool_dynamic(intent: str, available_tools: List[str], is_crypto: bool
         'historical': [
             r'historical.*crypto' if is_crypto else r'historical.*stock',
             r'historical.*price',
-            r'.*history.*'
         ],
-        'news': [r'.*news.*', r'.*article.*'],
-        'fundamentals': [
-            r'financial.*statement',
-            r'.*statement.*',
-            r'.*fundamental.*'
-        ],
-        'options': [r'option.*chain', r'.*option.*', r'expiration'],
-        'info': [r'.*info.*', r'.*overview.*'],
+        'news': [r'.*news.*'],
+        'fundamentals': [r'financial.*statement', r'.*statement.*'],
+        'options': [r'option.*chain', r'.*option.*'],
+        'info': [r'.*info.*'],
     }
     
-    # Try exact patterns first
     for pattern in patterns_by_intent.get(intent, []):
         for tool_lower, tool_name in tools_lower.items():
             if re.search(pattern, tool_lower):
                 return tool_name
     
-    # Fallback: simple keyword match
+    # Fallback: keyword match
     keywords = {
-        'price': ['price', 'quote', 'current'],
-        'historical': ['historical', 'history'],
+        'price': ['price', 'quote'],
+        'historical': ['historical'],
         'news': ['news'],
         'options': ['option'],
         'fundamentals': ['statement', 'financial'],
@@ -138,32 +114,23 @@ def _match_tool_dynamic(intent: str, available_tools: List[str], is_crypto: bool
             if keyword in tool_lower:
                 return tool_name
     
-    # Last resort
     return available_tools[0] if available_tools else None
 
 
-def _build_args_dynamic(
-    tool_name: str,
-    parsed: ParsedQuery,
-    schema: Dict
-) -> Dict[str, Any]:
-    """
-    Build arguments dynamically from schema.
-    NO hardcoding - reads schema properties!
-    """
+def _build_args_dynamic(tool_name: str, parsed: ParsedQuery, schema: Dict) -> Dict[str, Any]:
+    """Build arguments from schema."""
     props = schema.get('properties', {})
     args = {}
     
-    # 1. Ticker/Symbol
+    # Ticker/Symbol
     if parsed.ticker:
         if 'ticker' in props:
             args['ticker'] = parsed.ticker
         elif 'symbol' in props:
             args['symbol'] = parsed.ticker
     
-    # 2. Options handling
+    # Options
     if 'option' in tool_name.lower():
-        # Option type
         if 'option_type' in props:
             q = parsed.raw_query.lower()
             if 'call' in q:
@@ -173,38 +140,29 @@ def _build_args_dynamic(
             else:
                 args['option_type'] = 'chain'
         
-        # Expiration date - FIXED LOGIC
         if 'expiration_date' in props:
-            # Priority 1: Extract date from query
             explicit_date = _extract_date_from_query(parsed.raw_query)
-            if explicit_date:
-                args['expiration_date'] = explicit_date
-                print(f"[mcp_router] Using explicit date from query: {explicit_date}")
-            else:
-                # Priority 2: Calculate next monthly expiration
-                args['expiration_date'] = _calculate_next_monthly_expiration()
+            args['expiration_date'] = explicit_date or _calculate_next_monthly_expiration()
     
-    # 3. Time periods (historical)
+    # Time periods
     if 'period' in props:
         q = parsed.raw_query.lower()
-        if '6 month' in q or '6mo' in q:
+        if '6 month' in q:
             args['period'] = '6mo'
-        elif '1 year' in q or '1y' in q:
+        elif '1 year' in q:
             args['period'] = '1y'
-        elif '1 month' in q or '1mo' in q:
-            args['period'] = '1mo'
         else:
             args['period'] = '1y'
     
     if 'interval' in props:
         args['interval'] = '1d'
     
-    # 4. Financial statement type
+    # Financial type
     if 'financial_type' in props:
         q = parsed.raw_query.lower()
         if 'balance' in q:
             args['financial_type'] = 'balance_sheet'
-        elif 'cash flow' in q or 'cashflow' in q:
+        elif 'cash flow' in q:
             args['financial_type'] = 'cashflow'
         else:
             args['financial_type'] = 'income_stmt'
@@ -213,18 +171,16 @@ def _build_args_dynamic(
 
 
 def _parse_mcp_response(raw: str) -> tuple[Optional[Any], str]:
-    """Parse MCP response to extract JSON."""
+    """Parse MCP response."""
     if not isinstance(raw, str):
         return None, str(raw)
     
-    # Try direct JSON parse
     try:
         parsed = json.loads(raw)
         return parsed, raw
     except:
         pass
     
-    # Try to extract JSON from string
     for pattern in [r'\[.*\]', r'\{.*\}']:
         match = re.search(pattern, raw, re.DOTALL)
         if match:
@@ -237,31 +193,79 @@ def _parse_mcp_response(raw: str) -> tuple[Optional[Any], str]:
     return None, raw
 
 
+def _call_single_ticker(
+    parsed: ParsedQuery,
+    ticker: str,
+    manager: MCPManager,
+    server_name: str,
+    tools_map: Dict
+) -> Dict[str, Any]:
+    """
+    Call MCP for a single ticker.
+    Returns result dict.
+    """
+    # Update parsed query with current ticker
+    parsed_copy = ParsedQuery(
+        ticker=ticker,
+        additional_tickers=[],
+        intent=parsed.intent,
+        raw_query=parsed.raw_query
+    )
+    
+    is_crypto = _is_crypto(ticker)
+    available_tools = list(tools_map.keys())
+    
+    # Match tool
+    tool_name = _match_tool_dynamic(parsed.intent, available_tools, is_crypto)
+    if not tool_name:
+        return {'error': f'No tool for {ticker}'}
+    
+    # Build args
+    tool_schema = tools_map[tool_name].get('inputSchema', {})
+    args = _build_args_dynamic(tool_name, parsed_copy, tool_schema)
+    
+    print(f"[mcp_router] Calling {tool_name} for {ticker}: {args}")
+    
+    # Call MCP
+    try:
+        result = manager.call_sync(server_name, tool_name, args)
+        parsed_result, cleaned_raw = _parse_mcp_response(result)
+        
+        return {
+            'ticker': ticker,
+            'tool': tool_name,
+            'parsed': parsed_result,
+            'raw': cleaned_raw,
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'ticker': ticker,
+            'error': str(e)
+        }
+
+
 # ============================================================================
 # MAIN ROUTING
 # ============================================================================
 
 def route_and_call(query: str) -> Dict[str, Any]:
     """
-    Smart router with LLM parsing and dynamic tool matching.
+    Smart router with multi-ticker support.
+    If multiple tickers detected, calls for each and combines results.
     """
     print(f"\n{'='*60}")
     print(f"[Router] Query: {query}")
     
     try:
-        # Step 1: Parse with LLM (simple and fast)
+        # Step 1: Parse query
         parsed = parse_query_simple(query)
-        print(f"[Router] Parsed - Ticker: {parsed.ticker}, Intent: {parsed.intent}")
+        print(f"[Router] Parsed - Ticker: {parsed.ticker}, Additional: {parsed.additional_tickers}, Intent: {parsed.intent}")
         
         # Step 2: Check servers
         servers = MCPServer.from_env()
         if not servers:
-            return {
-                'error': 'No MCP servers configured',
-                'route': {},
-                'parsed': None,
-                'raw': ''
-            }
+            return {'error': 'No MCP servers configured', 'route': {}, 'parsed': None, 'raw': ''}
         
         # Step 3: Pick server
         is_crypto = _is_crypto(parsed.ticker)
@@ -274,89 +278,94 @@ def route_and_call(query: str) -> Dict[str, Any]:
         
         print(f"[Router] Server: {server_name} (crypto={is_crypto})")
         
-        # Step 4: Get tools dynamically
+        # Step 4: Get tools
         manager = MCPManager()
         tools_data = manager.list_tools_sync(server_name)
         
-        available_tools = []
         tools_map = {}
-        
         for t in tools_data.get('tools', []):
             name = t.get('name', '')
             if name and name.lower() not in ['meta', 'health', 'status']:
-                available_tools.append(name)
                 tools_map[name] = t
         
-        if not available_tools:
+        if not tools_map:
+            return {'error': f'No tools in {server_name}', 'route': {}, 'parsed': None, 'raw': ''}
+        
+        print(f"[Router] Available tools: {list(tools_map.keys())}")
+        
+        # Step 5: Handle multi-ticker comparison
+        all_tickers = [parsed.ticker] if parsed.ticker else []
+        all_tickers.extend(parsed.additional_tickers)
+        
+        if not all_tickers:
+            return {'error': 'No ticker found', 'route': {}, 'parsed': None, 'raw': ''}
+        
+        # Call for each ticker
+        results = []
+        for ticker in all_tickers:
+            result = _call_single_ticker(parsed, ticker, manager, server_name, tools_map)
+            results.append(result)
+        
+        # Combine results
+        if len(results) == 1:
+            # Single ticker - return as before
+            single = results[0]
+            if single.get('error'):
+                return {'error': single['error'], 'route': {}, 'parsed': None, 'raw': ''}
+            
+            print(f"[Router] Success - {len(str(single['raw']))} chars")
+            print(f"{'='*60}\n")
+            
             return {
-                'error': f'No tools in {server_name}',
-                'route': {'server': server_name},
-                'parsed': None,
-                'raw': ''
+                'route': {
+                    'server': server_name,
+                    'tool': single['tool'],
+                    'primary_ticker': parsed.ticker,
+                    'intent': parsed.intent
+                },
+                'parsed': single['parsed'],
+                'raw': single['raw'],
+                'error': None
             }
         
-        print(f"[Router] Available tools: {available_tools}")
-        
-        # Step 5: Match tool
-        tool_name = _match_tool_dynamic(parsed.intent, available_tools, is_crypto)
-        if not tool_name:
+        else:
+            # Multiple tickers - combine
+            print(f"[Router] Multi-ticker comparison: {len(results)} results")
+            
+            combined_raw = ""
+            combined_parsed = {}
+            
+            for i, res in enumerate(results):
+                ticker = res.get('ticker', f'Unknown{i}')
+                
+                if res.get('error'):
+                    combined_raw += f"\n\n### {ticker}\nError: {res['error']}"
+                else:
+                    combined_raw += f"\n\n### {ticker}\n{res.get('raw', '')}"
+                    combined_parsed[ticker] = res.get('parsed')
+            
+            print(f"[Router] Success - combined {len(combined_raw)} chars")
+            print(f"{'='*60}\n")
+            
             return {
-                'error': f'No tool matched for intent: {parsed.intent}',
-                'route': {'server': server_name},
-                'parsed': None,
-                'raw': ''
+                'route': {
+                    'server': server_name,
+                    'tool': results[0].get('tool', 'multiple'),
+                    'primary_ticker': parsed.ticker,
+                    'additional_tickers': parsed.additional_tickers,
+                    'intent': parsed.intent
+                },
+                'parsed': combined_parsed,
+                'raw': combined_raw.strip(),
+                'error': None
             }
-        
-        print(f"[Router] Matched tool: {tool_name}")
-        
-        # Step 6: Build args
-        tool_schema = tools_map[tool_name].get('inputSchema', {})
-        args = _build_args_dynamic(tool_name, parsed, tool_schema)
-        
-        # Check required fields
-        required = tool_schema.get('required', [])
-        if any(r in ['ticker', 'symbol'] for r in required) and not parsed.ticker:
-            return {
-                'error': 'Could not extract ticker. Please specify (e.g., AAPL, TSLA, BTC-USD)',
-                'route': {'server': server_name, 'tool': tool_name},
-                'parsed': None,
-                'raw': ''
-            }
-        
-        print(f"[Router] Args: {args}")
-        
-        # Step 7: Call tool
-        result = manager.call_sync(server_name, tool_name, args)
-        
-        # Step 8: Parse result
-        parsed_result, cleaned_raw = _parse_mcp_response(result)
-        
-        print(f"[Router] Success - {len(str(result))} chars")
-        print(f"{'='*60}\n")
-        
-        return {
-            'route': {
-                'server': server_name,
-                'tool': tool_name,
-                'primary_ticker': parsed.ticker,
-                'intent': parsed.intent
-            },
-            'parsed': parsed_result,
-            'raw': cleaned_raw,
-            'error': None
-        }
     
     except Exception as e:
         print(f"[Router] ERROR: {e}")
         import traceback
         traceback.print_exc()
         
-        return {
-            'error': str(e),
-            'route': {},
-            'parsed': None,
-            'raw': ''
-        }
+        return {'error': str(e), 'route': {}, 'parsed': None, 'raw': ''}
 
 
 # ============================================================================
@@ -365,7 +374,7 @@ def route_and_call(query: str) -> Dict[str, Any]:
 
 @tool(
     name="mcp_auto",
-    description="Smart MCP router with LLM parsing and dynamic tool matching"
+    description="Smart MCP router with multi-ticker comparison support"
 )
 @fuse(tool_name="mcp-auto", doc_type="mcp")
 def mcp_auto(query: str) -> str:
@@ -378,4 +387,11 @@ def mcp_auto(query: str) -> str:
     route = result.get('route', {})
     raw = result.get('raw', '')
     
-    return f"[{route.get('server')}/{route.get('tool')}]\n\n{raw}"
+    # Add header with context
+    tickers = [route.get('primary_ticker')]
+    if route.get('additional_tickers'):
+        tickers.extend(route['additional_tickers'])
+    
+    header = f"[{route.get('server')}/{route.get('tool')} | Tickers: {', '.join(filter(None, tickers))}]"
+    
+    return f"{header}\n\n{raw}"
