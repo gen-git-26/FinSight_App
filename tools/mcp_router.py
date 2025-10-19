@@ -163,6 +163,8 @@ def _pick_tool_by_intent(intent: str, tools_map: Dict[str, dict], server: str) -
 # ARGS BUILDING
 # ============================================================================
 
+# tools/mcp_router.py - ARGS BUILDING SECTION ONLY (replace lines 155-210)
+
 def _build_args_from_parsed_query(
     manager: MCPManager,
     server: str,
@@ -214,6 +216,12 @@ def _build_args_from_parsed_query(
             args["financial_type"] = "cashflow"
         else:
             args["financial_type"] = "income_stmt"
+    
+    # Recommendations - ADD THIS SECTION
+    if tool.get("name") == "get_recommendations":
+        if "recommendation_type" in props:
+            # Default to analyst recommendations
+            args["recommendation_type"] = "analyst"
     
     # Options
     if tool.get("name") == "get_option_chain":
