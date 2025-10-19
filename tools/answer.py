@@ -1,142 +1,77 @@
-# tools/answer.py
+# tools/answer.py 
 from __future__ import annotations
 
-import re
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 from agno.tools import tool
 from mcp_connection.manager import MCPServer
 from tools.mcp_router import route_and_call
-from tools.smart_formatter import _format_data_as_text, _detect_content_type
 
 
-def _normalize_mcp_payload(payload: Any) -> tuple[bool, Dict]:
-    """Normalize route_and_call outputs into a dict form."""
-    if isinstance(payload, dict):
-        if payload.get("error"):
-            return False, payload
-        has_content = payload.get("parsed") is not None or bool(payload.get("raw"))
-        return has_content, payload
-    
-    return False, {"error": "Invalid payload"}
-
-
-def _summarize_mcp_payload(norm: Dict) -> tuple[str, str, bool]:
+def _format_output(payload: Dict[str, Any]) -> tuple[str, str, bool]:
     """
-    Build a summary from normalized MCP payload with smart formatting.
+    Simple formatter - just clean display.
     
     Returns:
-        (answer_text, content_type, is_dataframe)
+        (text, display_type, is_dataframe)
     """
-    route = norm.get("route", {}) or {}
-    server = route.get("server", "?")
-    tool = route.get("tool", "?")
-    ticker = route.get("primary_ticker", "?")
-    intent = route.get("intent", "?")
+    if payload.get('error'):
+        return f"⚠️ {payload['error']}", 'error', False
     
-    parsed = norm.get("parsed")
+    parsed = payload.get('parsed')
+    raw = payload.get('raw', '')
     
-    if parsed:
-        # Auto-detect best display format
-        content_type = _detect_content_type(parsed)
-        
-        # DON'T add header for tables - let Streamlit render cleanly
-        if content_type == "table":
-            formatted_text, detected_type, is_df = _format_data_as_text(parsed, content_type)
-            return formatted_text, detected_type, is_df
-        
-        # For non-tables, add header
-        header = f"**Data Source**: {server}/{tool}\n"
-        header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
-        header += f"{'='*60}\n\n"
-        
-        formatted_text, detected_type, is_df = _format_data_as_text(parsed, content_type)
-        return header + formatted_text, detected_type, is_df
+    # Case 1: List of dicts → Table
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+        return json.dumps(parsed), 'table', True
     
-    # Fallback to raw
-    raw = norm.get("raw", "")
-    if isinstance(raw, str) and raw:
-        # Try to parse raw as JSON
-        try:
-            if raw.startswith('[') or raw.startswith('{'):
-                parsed_raw = json.loads(raw)
-                content_type = _detect_content_type(parsed_raw)
-                
-                # Check if it's a table
-                if content_type == "table":
-                    formatted_text, detected_type, is_df = _format_data_as_text(parsed_raw, content_type)
-                    return formatted_text, detected_type, is_df
-                
-                # Non-table: add header
-                header = f"**Data Source**: {server}/{tool}\n"
-                header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
-                header += f"{'='*60}\n\n"
-                
-                formatted_text, detected_type, is_df = _format_data_as_text(parsed_raw, content_type)
-                return header + formatted_text, detected_type, is_df
-        except:
-            pass
-        
-        # Raw text response
-        header = f"**Data Source**: {server}/{tool}\n"
-        header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
-        header += f"{'='*60}\n\n"
-        return header + f"Retrieved {len(raw)} bytes:\n\n{raw[:2000]}", "text", False
+    # Case 2: Dict → Key-value display
+    if isinstance(parsed, dict):
+        lines = []
+        for key, value in list(parsed.items())[:30]:
+            if not key.startswith('_'):
+                lines.append(f"**{key}**: {value}")
+        return '\n'.join(lines), 'dict', False
     
-    header = f"**Data Source**: {server}/{tool}\n"
-    header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
-    header += f"{'='*60}\n\n"
-    return header + "No data returned", "error", False
+    # Case 3: Raw text
+    return raw[:5000], 'text', False
 
 
 def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     """
-    Answer using MCP with intelligent formatting.
-    Returns formatted text that's optimized for Streamlit display.
+    Simple answer - calls router and formats.
     """
-    print(f"[answer_core] Query: {query[:100]}...")
+    print(f"[answer] Query: {query[:100]}")
     
     servers = MCPServer.from_env()
     if not servers:
         return {
-            "answer": "No MCP servers configured.",
-            "snippets": [],
-            "display_type": "error",
-            "meta": {"mcp_attempted": False, "mcp_success": False}
+            'answer': '⚠️ No MCP servers configured',
+            'snippets': [],
+            'display_type': 'error',
+            'is_dataframe': False,
+            'meta': {}
         }
     
-    # Call MCP router
-    mcp_payload = route_and_call(query)
-    mcp_success, mcp_norm = _normalize_mcp_payload(mcp_payload)
+    # Call router
+    result = route_and_call(query)
     
-    print(f"[answer_core] MCP success: {mcp_success}")
-    
-    if mcp_success:
-        answer_text, display_type, is_dataframe = _summarize_mcp_payload(mcp_norm)
-    else:
-        error_msg = mcp_norm.get("error", "Unknown error")
-        answer_text = f"Could not retrieve data: {error_msg}\n\nTip: Try a more specific query with a ticker symbol (e.g., AAPL, MSFT, SOL-USD)"
-        display_type = "error"
-        is_dataframe = False
-    
-    meta = {
-        "mcp_attempted": True,
-        "mcp_success": mcp_success,
-        "available_servers": list((servers or {}).keys()),
-        "display_type": display_type,
-        "is_dataframe": is_dataframe,
-    }
+    # Format
+    answer_text, display_type, is_dataframe = _format_output(result)
     
     return {
-        "answer": answer_text,
-        "snippets": [],
-        "display_type": display_type,
-        "is_dataframe": is_dataframe,
-        "meta": meta
+        'answer': answer_text,
+        'snippets': [],
+        'display_type': display_type,
+        'is_dataframe': is_dataframe,
+        'meta': {
+            'server': result.get('route', {}).get('server'),
+            'tool': result.get('route', {}).get('tool')
+        }
     }
 
 
-@tool(name="answer", description="Get financial data from MCP servers with smart formatting")
+@tool(name="answer", description="Get financial data via MCP")
 def answer(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
     return answer_core(query, ticker, style)
