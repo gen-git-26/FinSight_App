@@ -35,17 +35,23 @@ def _summarize_mcp_payload(norm: Dict) -> tuple[str, str, bool]:
     ticker = route.get("primary_ticker", "?")
     intent = route.get("intent", "?")
     
-    header = f"📊 **Data Source**: {server}/{tool}\n"
-    header += f"🔹 **Symbol**: {ticker} | **Intent**: {intent}\n"
-    header += f"{'='*60}\n\n"
-    
     parsed = norm.get("parsed")
     
     if parsed:
         # Auto-detect best display format
         content_type = _detect_content_type(parsed)
-        formatted_text, detected_type, is_df = _format_data_as_text(parsed, content_type)
         
+        # DON'T add header for tables - let Streamlit render cleanly
+        if content_type == "table":
+            formatted_text, detected_type, is_df = _format_data_as_text(parsed, content_type)
+            return formatted_text, detected_type, is_df
+        
+        # For non-tables, add header
+        header = f"**Data Source**: {server}/{tool}\n"
+        header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
+        header += f"{'='*60}\n\n"
+        
+        formatted_text, detected_type, is_df = _format_data_as_text(parsed, content_type)
         return header + formatted_text, detected_type, is_df
     
     # Fallback to raw
@@ -56,15 +62,32 @@ def _summarize_mcp_payload(norm: Dict) -> tuple[str, str, bool]:
             if raw.startswith('[') or raw.startswith('{'):
                 parsed_raw = json.loads(raw)
                 content_type = _detect_content_type(parsed_raw)
+                
+                # Check if it's a table
+                if content_type == "table":
+                    formatted_text, detected_type, is_df = _format_data_as_text(parsed_raw, content_type)
+                    return formatted_text, detected_type, is_df
+                
+                # Non-table: add header
+                header = f"**Data Source**: {server}/{tool}\n"
+                header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
+                header += f"{'='*60}\n\n"
+                
                 formatted_text, detected_type, is_df = _format_data_as_text(parsed_raw, content_type)
                 return header + formatted_text, detected_type, is_df
         except:
             pass
         
         # Raw text response
+        header = f"**Data Source**: {server}/{tool}\n"
+        header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
+        header += f"{'='*60}\n\n"
         return header + f"Retrieved {len(raw)} bytes:\n\n{raw[:2000]}", "text", False
     
-    return header + " No data returned", "error", False
+    header = f"**Data Source**: {server}/{tool}\n"
+    header += f"**Symbol**: {ticker} | **Intent**: {intent}\n"
+    header += f"{'='*60}\n\n"
+    return header + "No data returned", "error", False
 
 
 def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]:
@@ -93,7 +116,7 @@ def answer_core(query: str, ticker: str = "", style: str = "") -> Dict[str, Any]
         answer_text, display_type, is_dataframe = _summarize_mcp_payload(mcp_norm)
     else:
         error_msg = mcp_norm.get("error", "Unknown error")
-        answer_text = f"Could not retrieve data: {error_msg}\n\n💡 **Tip**: Try a more specific query with a ticker symbol (e.g., AAPL, MSFT, SOL-USD)"
+        answer_text = f"Could not retrieve data: {error_msg}\n\nTip: Try a more specific query with a ticker symbol (e.g., AAPL, MSFT, SOL-USD)"
         display_type = "error"
         is_dataframe = False
     
