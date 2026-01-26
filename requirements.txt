@@ -15,4 +15,3 @@ langchain_groq
 websockets
 yfinance
 qdrant_client
-mcp
