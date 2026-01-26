@@ -1,5 +1,5 @@
 # utils/config.py
-# This file is used to load configuration settings for the application.
+
 import os
 from pathlib import Path
 
