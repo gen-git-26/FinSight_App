@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 
 # Query types for routing
-QueryType = Literal["stock", "crypto", "options", "news", "fundamentals", "comparison", "general"]
+QueryType = Literal["stock", "crypto", "options", "news", "fundamentals", "comparison", "trading", "general"]
 
 
 @dataclass
@@ -54,6 +54,11 @@ class AgentState(TypedDict, total=False):
 
     This is the central data structure that flows through the LangGraph.
     Each agent can read from and write to this state.
+
+    Supports two flows:
+    1. Standard flow: query → parsed_query → fetched_data → analysis → response
+    2. Trading flow (A2A): query → parsed_query → fetched_data → analyst_reports →
+                          research_report → risk_assessment → trading_decision → response
     """
     # Input
     query: str
@@ -62,6 +67,7 @@ class AgentState(TypedDict, total=False):
     # Router output
     parsed_query: ParsedQuery
     next_agent: str  # Which agent to route to
+    is_trading_query: bool  # A2A flag for trading flow
 
     # Memory
     memory: MemoryContext
@@ -69,8 +75,15 @@ class AgentState(TypedDict, total=False):
     # Fetched data (from Fetcher or Crypto agent)
     fetched_data: List[FetchedData]
 
-    # Analysis
+    # Standard analysis
     analysis: AnalysisResult
+
+    # Trading flow (A2A - TradingAgents)
+    analyst_reports: List[Any]  # List of AnalystReport from analysts_team
+    research_report: Any  # ResearchReport from researchers (bull/bear debate)
+    trading_recommendation: str  # Initial recommendation from researchers
+    risk_assessment: Any  # RiskAssessment from risk_manager
+    trading_decision: Any  # TradingDecision from trader
 
     # Final output
     response: str
