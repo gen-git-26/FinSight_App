@@ -1,213 +1,78 @@
 # agent/nodes/fetcher.py
 """
-Fetcher Agent - Fetches stock data from MCP servers and APIs.
+Fetcher Agent - Fetches stock data using the unified datasources layer.
+
+Uses:
+- DataFetcher for automatic source selection and fallback
+- Integrates with RAG for data storage
 """
 from __future__ import annotations
 
-import re
-import json
-from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+import asyncio
+from typing import Dict, Any, List
 
 from agent.state import AgentState, FetchedData, ParsedQuery
-from mcp_connection.manager import MCPManager, MCPServer
-from utils.config import load_settings
+from datasources import DataFetcher, DataType, get_fetcher
 
 
-def _extract_date_from_query(query: str) -> Optional[str]:
-    """Extract explicit date from query."""
-    patterns = [
-        r'(\d{4}-\d{2}-\d{2})',
-        r'(\d{2}/\d{2}/\d{4})',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, query)
-        if match:
-            return match.group(1)
-    return None
+# Map intent strings to DataType
+INTENT_TO_DATA_TYPE = {
+    'price': DataType.QUOTE,
+    'quote': DataType.QUOTE,
+    'fundamentals': DataType.FUNDAMENTALS,
+    'options': DataType.OPTIONS,
+    'historical': DataType.HISTORICAL,
+    'news': DataType.NEWS,
+    'info': DataType.QUOTE,
+    'analysis': DataType.FUNDAMENTALS,
+    'trading': DataType.FUNDAMENTALS,
+}
 
 
-def _calculate_next_expiration() -> str:
-    """Calculate next monthly options expiration (3rd Friday)."""
-    today = datetime.now()
-    year, month = today.year, today.month
-
-    first_day = datetime(year, month, 1)
-    days_to_friday = (4 - first_day.weekday()) % 7
-    first_friday = first_day + timedelta(days=days_to_friday)
-    third_friday = first_friday + timedelta(weeks=2)
-
-    if third_friday < today:
-        month += 1
-        if month > 12:
-            month, year = 1, year + 1
-        first_day = datetime(year, month, 1)
-        days_to_friday = (4 - first_day.weekday()) % 7
-        first_friday = first_day + timedelta(days=days_to_friday)
-        third_friday = first_friday + timedelta(weeks=2)
-
-    return third_friday.strftime('%Y-%m-%d')
-
-
-def _match_tool(intent: str, tools: List[str]) -> Optional[str]:
-    """Match intent to available tool."""
-    tools_lower = {t.lower(): t for t in tools}
-
-    patterns = {
-        'price': ['price', 'quote', 'info'],
-        'options': ['option'],
-        'fundamentals': ['financial', 'statement'],
-        'historical': ['historical'],
-        'news': ['news'],
-    }
-
-    for keyword in patterns.get(intent, ['info']):
-        for tool_lower, tool_name in tools_lower.items():
-            if keyword in tool_lower:
-                return tool_name
-
-    return tools[0] if tools else None
-
-
-def _build_args(tool_name: str, parsed: ParsedQuery, schema: Dict) -> Dict[str, Any]:
-    """Build arguments for tool call."""
-    props = schema.get('properties', {})
-    args = {}
-
-    # Ticker/Symbol
-    if parsed.ticker:
-        if 'ticker' in props:
-            args['ticker'] = parsed.ticker
-        elif 'symbol' in props:
-            args['symbol'] = parsed.ticker
-
-    # Options specific
-    if 'option' in tool_name.lower():
-        if 'option_type' in props:
-            q = parsed.raw_query.lower()
-            if 'call' in q:
-                args['option_type'] = 'calls'
-            elif 'put' in q:
-                args['option_type'] = 'puts'
-            else:
-                args['option_type'] = 'chain'
-
-        if 'expiration_date' in props:
-            date = _extract_date_from_query(parsed.raw_query)
-            args['expiration_date'] = date or _calculate_next_expiration()
-
-    # Financial type
-    if 'financial_type' in props:
-        q = parsed.raw_query.lower()
-        if 'balance' in q:
-            args['financial_type'] = 'balance_sheet'
-        elif 'cash' in q:
-            args['financial_type'] = 'cashflow'
-        else:
-            args['financial_type'] = 'income_stmt'
-
-    # Period
-    if 'period' in props:
-        args['period'] = '1y'
-    if 'interval' in props:
-        args['interval'] = '1d'
-
-    return args
-
-
-def _fetch_single_ticker(
-    ticker: str,
-    parsed: ParsedQuery,
-    manager: MCPManager,
-    server_name: str,
-    tools_map: Dict
-) -> FetchedData:
-    """Fetch data for a single ticker."""
-    print(f"[Fetcher] Fetching {ticker}...")
-
-    tool_name = _match_tool(parsed.intent, list(tools_map.keys()))
-    if not tool_name:
-        return FetchedData(
-            source=server_name,
-            error=f"No suitable tool for intent: {parsed.intent}"
-        )
-
-    # Build args
-    temp_parsed = ParsedQuery(
-        ticker=ticker,
-        intent=parsed.intent,
-        query_type=parsed.query_type,
-        raw_query=parsed.raw_query
-    )
-    schema = tools_map[tool_name].get('inputSchema', {})
-    args = _build_args(tool_name, temp_parsed, schema)
-
-    print(f"[Fetcher] Calling {tool_name} with {args}")
-
-    try:
-        result = manager.call_sync(server_name, tool_name, args)
-
-        # Parse result
-        parsed_data = {}
-        if isinstance(result, str):
-            try:
-                parsed_data = json.loads(result)
-            except:
-                parsed_data = {"raw": result}
-        elif isinstance(result, dict):
-            parsed_data = result
+def _convert_result_to_fetched_data(result, ticker: str) -> FetchedData:
+    """Convert DataResult to FetchedData for state compatibility."""
+    if result.success:
+        # Convert dataclass to dict if needed
+        parsed_data = result.data
+        if hasattr(parsed_data, "__dict__"):
+            parsed_data = parsed_data.__dict__
 
         return FetchedData(
-            source=server_name,
-            tool_used=tool_name,
-            raw_data=result,
+            source=result.source,
+            tool_used=result.data_type.value if result.data_type else "unknown",
+            raw_data=result.raw,
             parsed_data=parsed_data
         )
-
-    except Exception as e:
+    else:
         return FetchedData(
-            source=server_name,
-            tool_used=tool_name,
-            error=str(e)
+            source=result.source or "datasources",
+            error=result.error
         )
+
+
+async def _fetch_ticker_async(
+    fetcher: DataFetcher,
+    ticker: str,
+    data_type: DataType,
+    **kwargs
+) -> FetchedData:
+    """Fetch data for a single ticker asynchronously."""
+    result = await fetcher.fetch(ticker, data_type, **kwargs)
+    return _convert_result_to_fetched_data(result, ticker)
 
 
 def fetcher_node(state: AgentState) -> Dict[str, Any]:
     """
-    Fetcher node - fetches stock data from MCP servers.
+    Fetcher node - fetches stock data using the unified datasources layer.
 
     Handles: stocks, options, fundamentals, news
+    Automatic fallback chain: yfinance → finnhub → alphavantage
     """
     parsed = state.get("parsed_query")
     if not parsed:
         return {"error": "No parsed query", "fetched_data": []}
 
     print(f"\n[Fetcher] Intent: {parsed.intent}, Ticker: {parsed.ticker}")
-
-    # Get MCP servers
-    servers = MCPServer.from_env()
-    if not servers:
-        # Fallback to direct API
-        return _fallback_fetch(state)
-
-    # Select server (yfinance for stocks)
-    server_name = 'yfinance' if 'yfinance' in servers else next(iter(servers))
-    print(f"[Fetcher] Using server: {server_name}")
-
-    # Get available tools
-    manager = MCPManager()
-    tools_data = manager.list_tools_sync(server_name)
-
-    tools_map = {}
-    for t in tools_data.get('tools', []):
-        name = t.get('name', '')
-        if name and name.lower() not in ['meta', 'health', 'status']:
-            tools_map[name] = t
-
-    if not tools_map:
-        return {"error": f"No tools in {server_name}", "fetched_data": []}
-
-    print(f"[Fetcher] Available tools: {list(tools_map.keys())}")
 
     # Collect all tickers
     tickers = []
@@ -218,56 +83,95 @@ def fetcher_node(state: AgentState) -> Dict[str, Any]:
     if not tickers:
         return {"error": "No tickers found", "fetched_data": []}
 
-    # Fetch for each ticker
-    results = []
-    for ticker in tickers:
-        data = _fetch_single_ticker(ticker, parsed, manager, server_name, tools_map)
-        results.append(data)
+    # Map intent to data type
+    data_type = INTENT_TO_DATA_TYPE.get(parsed.intent, DataType.QUOTE)
+    print(f"[Fetcher] Data type: {data_type.value}")
 
-    print(f"[Fetcher] Fetched {len(results)} results")
+    # Get fetcher instance
+    fetcher = get_fetcher()
+
+    # Fetch data for all tickers
+    async def fetch_all():
+        tasks = [
+            _fetch_ticker_async(fetcher, ticker, data_type)
+            for ticker in tickers
+        ]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Run async fetch
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If already in async context, use run_coroutine_threadsafe
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                results = pool.submit(asyncio.run, fetch_all()).result()
+        else:
+            results = asyncio.run(fetch_all())
+    except RuntimeError:
+        results = asyncio.run(fetch_all())
+
+    # Convert exceptions to FetchedData with errors
+    fetched_data = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            fetched_data.append(FetchedData(
+                source="datasources",
+                error=str(result)
+            ))
+        else:
+            fetched_data.append(result)
+
+    # Log results
+    successful = [r for r in fetched_data if not r.error]
+    print(f"[Fetcher] Fetched {len(fetched_data)} results, {len(successful)} successful")
 
     return {
-        "fetched_data": results,
-        "mcp_server_used": server_name,
-        "tools_available": list(tools_map.keys())
+        "fetched_data": fetched_data,
+        "sources": [r.source for r in successful]
     }
 
 
-def _fallback_fetch(state: AgentState) -> Dict[str, Any]:
-    """Fallback to direct API calls if MCP not available."""
-    import finnhub
-    from utils.config import load_settings
+# === Trading Fetcher (for A2A flow) ===
 
+def trading_fetcher_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Trading Fetcher - fetches comprehensive data for trading analysis.
+
+    Fetches multiple data types: fundamentals, news, and quote.
+    """
     parsed = state.get("parsed_query")
-    cfg = load_settings()
+    if not parsed:
+        return {"error": "No parsed query", "fetched_data": []}
 
-    results = []
+    ticker = parsed.ticker
+    if not ticker:
+        return {"error": "No ticker for trading analysis", "fetched_data": []}
 
-    if parsed and parsed.ticker:
-        try:
-            client = finnhub.Client(api_key=cfg.finnhub_api_key)
+    print(f"\n[Trading Fetcher] Comprehensive fetch for: {ticker}")
 
-            if parsed.intent == 'price':
-                data = client.quote(parsed.ticker)
-            elif parsed.intent == 'fundamentals':
-                data = client.company_basic_financials(parsed.ticker, 'all')
-            else:
-                data = client.quote(parsed.ticker)
+    fetcher = get_fetcher()
 
-            results.append(FetchedData(
-                source="finnhub",
-                tool_used="fallback",
-                raw_data=data,
-                parsed_data=data if isinstance(data, dict) else {"data": data}
-            ))
+    async def fetch_comprehensive():
+        return await fetcher.fetch_comprehensive(ticker)
 
-        except Exception as e:
-            results.append(FetchedData(
-                source="finnhub",
-                error=str(e)
-            ))
+    # Run async fetch
+    try:
+        results = asyncio.run(fetch_comprehensive())
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+        results = loop.run_until_complete(fetch_comprehensive())
+
+    # Convert to FetchedData list
+    fetched_data = []
+    for data_type, result in results.items():
+        fetched_data.append(_convert_result_to_fetched_data(result, ticker))
+
+    successful = [r for r in fetched_data if not r.error]
+    print(f"[Trading Fetcher] Fetched {len(fetched_data)} data types, {len(successful)} successful")
 
     return {
-        "fetched_data": results,
-        "mcp_server_used": "finnhub-fallback"
+        "fetched_data": fetched_data,
+        "sources": list(set(r.source for r in successful)),
+        "ticker": ticker
     }

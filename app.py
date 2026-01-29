@@ -1,20 +1,25 @@
 # app.py
+"""
+FinSight - Multi-Agent Financial Analysis System
+
+Powered by LangGraph with A2A (Agent-to-Agent) architecture:
+- Standard Flow: Router → Fetcher/Crypto → Analyst → Composer
+- Trading Flow: Router → Fetcher → Analysts Team → Researchers → Trader → Risk Manager → Fund Manager → Composer
+"""
 from __future__ import annotations
 import os, json
 import streamlit as st
 import dotenv
 dotenv.load_dotenv()
 
-from tools.answer import answer_core
-from mcp_connection.manager import MCPServer
-from mcp_connection.startup import startup_mcp_servers, get_manager
-from tools.mcp_router import route_and_call
+# New multi-agent system
+from agent.graph import run_query, stream_query, get_graph
 
 # -----------------------------
 # Theme & assets
 # -----------------------------
-LOGO_PATH = "/workspaces/new_test/data/logo.png"
-BOT_ICON_PATH = "/workspaces/new_test/data/bot_icon.png"
+LOGO_PATH = "ui/logo.png"
+BOT_ICON_PATH = "ui/bot_icon.png"
 
 PRIMARY_MINT = "#9AF8CC"
 TEXT_MAIN   = "#FFFFFF"   
@@ -118,48 +123,39 @@ with col_title:
     st.markdown('<div class="brand-sub">Smart Financial Agent</div>', unsafe_allow_html=True)
 
 # -----------------------------
-# MCP controls (sidebar)
+# Sidebar - Agent Info
 # -----------------------------
 with st.sidebar:
     st.image(LOGO_PATH, use_container_width=True)
-    st.subheader("MCP Server Status")
-    servers = MCPServer.from_env()
-    manager = get_manager()
-    if not servers:
-        st.info("No MCP servers configured. Set MCP_SERVERS in .env")
-    else:
-        status = manager.get_server_status()
-        for name, _srv in servers.items():
-            st.write(f"**{name}** {status.get(name, 'Unknown')}")
-        st.divider()
-        if st.button("Restart All"):
-            with st.spinner("Restarting servers..."):
-                manager.stop_all_servers()
-                st.session_state["startup_results"] = startup_mcp_servers()
-            st.rerun()
+    st.subheader("Multi-Agent System")
+
+    st.markdown("""
+    **Standard Flow:**
+    - Router → Fetcher/Crypto → Analyst → Composer
+
+    **Trading Flow (A2A):**
+    - 4 Analysts (Fundamental, Sentiment, News, Technical)
+    - Bull vs Bear Research (3 rounds)
+    - Trader Decision (BUY/SELL/HOLD)
+    - Risk Management (3 rounds)
+    - Fund Manager Approval
+    """)
+
+    st.divider()
+    st.caption("Powered by LangGraph")
+
+    # Clear chat button
+    if st.button("Clear Chat", use_container_width=True):
+        st.session_state["messages"] = []
+        st.rerun()
 
 # -----------------------------
 # Session state
 # -----------------------------
-if "mcp_started" not in st.session_state:
-    st.session_state["mcp_started"] = False
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
-
-# Start MCP servers once
-if not st.session_state["mcp_started"]:
-    with st.spinner("Starting MCP servers..."):
-        results = startup_mcp_servers()
-        st.session_state["mcp_started"] = True
-        st.session_state["startup_results"] = results
-        if results:
-            ok, total = sum(results.values()), len(results)
-            if ok == total:
-                st.success(f"All {ok}/{total} MCP servers started successfully!")
-            else:
-                st.warning(f"{ok}/{total} MCP servers started")
-        else:
-            st.info("No MCP servers configured")
+if "user_id" not in st.session_state:
+    st.session_state["user_id"] = "default"
 
 # -----------------------------
 # Agent button with visible icon
@@ -206,121 +202,53 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Call MCP router directly for a raw view
-    try:
-        mcp_payload = route_and_call(prompt)
-    except Exception as e:
-        mcp_payload = {"error": f"Route error: {e}"}
-
-    # Live MCP inspector
-    with st.expander("Live MCP", expanded=False):
-        def _show_parsed(obj):
-            try:
-                import pandas as pd
-            except Exception:
-                pd = None
-            if isinstance(obj, list) and obj and isinstance(obj[0], dict) and pd is not None:
-                st.dataframe(pd.DataFrame(obj))
-            elif isinstance(obj, (dict, list)):
-                st.json(obj)
-            else:
-                st.code(str(obj), language="text")
-
-        if isinstance(mcp_payload, dict):
-            if mcp_payload.get("error"):
-                st.error(mcp_payload["error"])
-            else:
-                st.subheader("Route")
-                st.json(mcp_payload.get("route", {}))
-                st.subheader("Parsed")
-                if mcp_payload.get("parsed") is not None:
-                    _show_parsed(mcp_payload.get("parsed"))
-                else:
-                    st.info("No JSON payload. See Raw below.")
-                st.subheader("Raw")
-                st.code(mcp_payload.get("raw", ""), language="json")
-        else:
-            raw = mcp_payload
-            st.subheader("Raw")
-            st.code(raw if isinstance(raw, str) else str(raw), language="text")
-            try:
-                if isinstance(raw, str):
-                    start = min([i for i in [raw.find("["), raw.find("{")] if i != -1] or [None])
-                    if start is not None:
-                        parsed = json.loads(raw[start:])
-                        st.subheader("Parsed (best effort)")
-                        _show_parsed(parsed)
-            except Exception:
-                pass
-
-    # Final assistant answer (shows with bot avatar)
+    # Process with multi-agent system
     with st.chat_message("assistant", avatar=BOT_ICON_PATH):
         try:
-            out = answer_core(prompt)
-            txt = (out or {}).get("answer", "")
-            display_type = (out or {}).get("display_type", "text")
-            is_dataframe = (out or {}).get("is_dataframe", False)
-            
-            # Smart display based on content type
-            if is_dataframe and display_type == "table":
-                # Parse and display as interactive table
-                try:
-                    import pandas as pd
-                    data = json.loads(txt)
-                    if isinstance(data, str):
-                        data = json.loads(data)
-                    
-                    df = pd.DataFrame(json.loads(data)) if isinstance(data, str) else pd.DataFrame(data)
-                    
-                    # Format columns nicely
-                    with st.container(border=True):
-                        st.markdown("### Results")
-                        st.dataframe(
-                            df,
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                col: st.column_config.NumberColumn(
-                                    format="$%.2f" if "price" in col.lower() else "%.4f"
-                                )
-                                for col in df.columns
-                                if df[col].dtype in ['float64', 'int64']
-                            }
-                        )
-                except Exception as e:
-                    print(f"[app] Dataframe render error: {e}")
-                    st.markdown(txt)
-            
-            elif display_type == "dict":
-                # Formatted key-value display
-                with st.container(border=True):
-                    st.markdown("### Data Summary")
-                    st.markdown(txt)
-            
-            elif display_type == "error":
-                # Error display
-                st.error(txt)
-            
-            else:
-                # Default text display
-                st.markdown(txt)
-            
-            # Store message
-            st.session_state["messages"].append({"role": "assistant", "content": txt})
+            # Show progress for trading queries
+            trading_keywords = ["buy", "sell", "trade", "invest", "should i", "trading", "position"]
+            is_trading = any(kw in prompt.lower() for kw in trading_keywords)
 
-            # Sources (if available) - REMOVED METADATA SECTION
-            snips = (out or {}).get("snippets") or []
-            if snips:
-                with st.expander(f"Sources ({len(snips)} snippets)", expanded=False):
-                    for i, s in enumerate(snips[:10], 1):
-                        sym = s.get("symbol") or "N/A"
-                        dt_ = s.get("date") or "N/A"
-                        src = s.get("source") or "unknown"
-                        prev = (s.get("text") or "")[:200]
-                        st.write(f"**{i}.** `{src}` | **{sym}** ({dt_})")
-                        st.write(f"_{prev}..._")
-                        st.divider()
-        
+            if is_trading:
+                # Show trading flow progress
+                progress_placeholder = st.empty()
+                with progress_placeholder.container():
+                    st.info("Processing with TradingAgents A2A flow...")
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    stages = [
+                        (10, "Routing query..."),
+                        (20, "Fetching market data..."),
+                        (40, "Running 4 analyst reports..."),
+                        (60, "Bull vs Bear research debate..."),
+                        (70, "Trader making decision..."),
+                        (85, "Risk management assessment..."),
+                        (95, "Fund manager approval..."),
+                        (100, "Composing response...")
+                    ]
+
+                    # Simulate progress (actual processing happens in run_query)
+                    import time
+                    for pct, msg in stages[:2]:
+                        progress_bar.progress(pct)
+                        status_text.text(msg)
+                        time.sleep(0.1)
+
+                # Run the actual query
+                response = run_query(prompt, user_id=st.session_state["user_id"])
+
+                # Clear progress
+                progress_placeholder.empty()
+            else:
+                # Standard flow with simple spinner
+                with st.spinner("Analyzing..."):
+                    response = run_query(prompt, user_id=st.session_state["user_id"])
+
+            # Display response
+            st.markdown(response)
+            st.session_state["messages"].append({"role": "assistant", "content": response})
+
         except Exception as e:
             st.error(f"Error: {e}")
             print(f"[app] Assistant response error: {e}")

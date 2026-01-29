@@ -16,7 +16,7 @@ from typing import Dict, Any
 
 from agent.state import AgentState, ParsedQuery
 from utils.config import load_settings
-from memory.manager import fetch_memory, _session
+from infrastructure.redis_stm import get_stm
 
 
 # Trading-related keywords for A2A routing
@@ -93,18 +93,14 @@ def router_node(state: AgentState) -> Dict[str, Any]:
 
     cfg = load_settings()
 
-    # Get memory context
+    # Get memory context from Redis STM
+    stm = get_stm()
     try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                memory_context = pool.submit(
-                    asyncio.run, fetch_memory(query, k=3)
-                ).result()
-        else:
-            memory_context = asyncio.run(fetch_memory(query, k=3))
+        session_history = stm.get_history(user_id, limit=5)
+        memory_context = "\n".join([
+            f"{m['role']}: {m['content'][:100]}"
+            for m in session_history
+        ]) if session_history else ""
     except Exception as e:
         print(f"[Router] Memory fetch failed: {e}")
         memory_context = ""
@@ -167,7 +163,7 @@ def router_node(state: AgentState) -> Dict[str, Any]:
             "is_trading_query": is_trading_query,
             "memory": {
                 "user_id": user_id,
-                "session_history": _session.context(),
+                "session_history": session_history if 'session_history' in dir() else [],
                 "retrieved_memory": memory_context
             }
         }

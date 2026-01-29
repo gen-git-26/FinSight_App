@@ -9,7 +9,7 @@ import httpx
 from typing import Dict, Any, List
 
 from agent.state import AgentState, AnalysisResult
-from memory.manager import persist_turn
+from infrastructure.redis_stm import get_stm
 from utils.config import load_settings
 
 
@@ -171,10 +171,12 @@ def _handle_general_query(state: AgentState) -> str:
         return f"I apologize, I couldn't process your question. Error: {e}"
 
 
-async def _save_to_memory(query: str, response: str) -> None:
-    """Save the interaction to memory."""
+def _save_to_memory(user_id: str, query: str, response: str) -> None:
+    """Save the interaction to Redis STM."""
     try:
-        await persist_turn(query, response)
+        stm = get_stm()
+        stm.add_to_history(user_id, "user", query)
+        stm.add_to_history(user_id, "assistant", response)
     except Exception as e:
         print(f"[Composer] Memory save failed: {e}")
 
@@ -201,13 +203,10 @@ def composer_node(state: AgentState) -> Dict[str, Any]:
     fetched_data = state.get("fetched_data", [])
     sources = list(set([d.source for d in fetched_data if not d.error]))
 
-    # Save to memory (async)
+    # Save to memory
     query = parsed_query.raw_query if parsed_query else state.get("query", "")
-    try:
-        import asyncio
-        asyncio.create_task(_save_to_memory(query, response))
-    except:
-        pass  # Memory save is best-effort
+    user_id = state.get("user_id", "default")
+    _save_to_memory(user_id, query, response)
 
     print(f"[Composer] Response length: {len(response)} chars")
 

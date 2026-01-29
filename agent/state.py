@@ -79,11 +79,13 @@ class AgentState(TypedDict, total=False):
     analysis: AnalysisResult
 
     # Trading flow (A2A - TradingAgents)
-    analyst_reports: List[Any]  # List of AnalystReport from analysts_team
-    research_report: Any  # ResearchReport from researchers (bull/bear debate)
+    # Flow: analysts_team → researchers → trader → risk_manager → fund_manager
+    analyst_reports: List[Any]  # List of AnalystReport from analysts_team (4 analysts)
+    research_report: Any  # ResearchReport from researchers (bull/bear debate - 3 rounds)
     trading_recommendation: str  # Initial recommendation from researchers
-    risk_assessment: Any  # RiskAssessment from risk_manager
     trading_decision: Any  # TradingDecision from trader
+    risk_assessment: Any  # RiskAssessment from risk_manager (3 personas - 3 rounds)
+    fund_manager_decision: Any  # FundManagerDecision - final approval
 
     # Final output
     response: str

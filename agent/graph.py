@@ -8,66 +8,76 @@ Two main flows:
    router → fetcher/crypto → analyst → composer
 
 2. TRADING FLOW (A2A - TradingAgents):
-   router → fetcher → analysts_team → researchers → risk_manager → trader → trading_composer
+   router → fetcher → analysts_team → researchers → trader → risk_manager → fund_manager → composer
 
 Architecture Diagram:
-                         ┌─────────────┐
-                         │   START     │
-                         └──────┬──────┘
-                                │
-                                ▼
-                         ┌─────────────┐
-                         │   Router    │
-                         └──────┬──────┘
-                                │
-         ┌──────────────────────┼──────────────────────┐
-         │                      │                      │
-         │               ┌──────┴──────┐               │
-         │               │  is_trading? │              │
-         │               └──────┬──────┘               │
-         │                      │                      │
-    ┌────┴────┐           ┌─────┴─────┐          ┌─────┴─────┐
-    │  Crypto │           │  Fetcher  │          │ Composer  │
-    └────┬────┘           └─────┬─────┘          │ (general) │
-         │                      │                └─────┬─────┘
-         │         ┌────────────┼────────────┐         │
-         │         │            │            │         │
-         │    [Standard]   [Trading A2A]     │         │
-         │         │            │            │         │
-         │         ▼            ▼            │         │
-         │    ┌────────┐  ┌──────────┐       │         │
-         │    │Analyst │  │ Analysts │       │         │
-         │    └───┬────┘  │  Team    │       │         │
-         │        │       └────┬─────┘       │         │
-         │        │            │             │         │
-         │        │            ▼             │         │
-         │        │       ┌──────────┐       │         │
-         │        │       │Researchers│      │         │
-         │        │       │Bull/Bear │       │         │
-         │        │       └────┬─────┘       │         │
-         │        │            │             │         │
-         │        │            ▼             │         │
-         │        │       ┌──────────┐       │         │
-         │        │       │   Risk   │       │         │
-         │        │       │ Manager  │       │         │
-         │        │       └────┬─────┘       │         │
-         │        │            │             │         │
-         │        │            ▼             │         │
-         │        │       ┌──────────┐       │         │
-         │        │       │  Trader  │       │         │
-         │        │       └────┬─────┘       │         │
-         │        │            │             │         │
-         └────────┴────────────┼─────────────┴─────────┘
-                               │
-                               ▼
-                        ┌──────────┐
-                        │ Composer │
-                        └────┬─────┘
-                             │
-                             ▼
-                        ┌──────────┐
-                        │   END    │
-                        └──────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         ORCHESTRATION LAYER                                      │
+│                                                                                  │
+│                         ┌──────────────┐                                        │
+│                         │    ROUTER    │                                        │
+│                         │   (Hybrid)   │                                        │
+│                         └──────┬───────┘                                        │
+│                                │                                                │
+│         ┌──────────────────────┼──────────────────────┐                        │
+│         ▼                      ▼                      ▼                        │
+│  ┌─────────────┐       ┌─────────────┐       ┌─────────────┐                   │
+│  │   CRYPTO    │       │   FETCHER   │       │  TRADING    │                   │
+│  │   AGENT     │       │   AGENT     │       │    A2A      │──────┐            │
+│  └──────┬──────┘       └──────┬──────┘       └─────────────┘      │            │
+│         │                     │                                    │            │
+│         └──────────┬──────────┘                                    │            │
+│                    ▼                                               │            │
+│             ┌─────────────┐                                       │            │
+│             │   ANALYST   │                                       │            │
+│             └──────┬──────┘                                       │            │
+│                    │                                               │            │
+│                    ▼                                               │            │
+│             ┌─────────────┐                                       │            │
+│             │  COMPOSER   │◄──────────────────────────────────────┘            │
+│             └─────────────┘                                                    │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    A2A: TRADING AGENTS SUB-GRAPH                                │
+│                                                                                  │
+│  ┌───────────────────────────────────────────────────────────────────────────┐ │
+│  │                    ANALYSTS TEAM (4 Parallel)                              │ │
+│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐         │ │
+│  │  │ Fundamental │ │  Sentiment  │ │    News     │ │  Technical  │         │ │
+│  │  │   Analyst   │ │   Analyst   │ │   Analyst   │ │   Analyst   │         │ │
+│  │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘         │ │
+│  └───────────────────────────────────────────────────────────────────────────┘ │
+│                                 │                                               │
+│                                 ▼                                               │
+│  ┌───────────────────────────────────────────────────────────────────────────┐ │
+│  │                    RESEARCH TEAM (Debate - 3 rounds)                       │ │
+│  │         ┌──────────┐                      ┌──────────┐                    │ │
+│  │         │  BULL    │◄────── Debate ──────►│  BEAR    │                    │ │
+│  │         │Researcher│      (3 rounds)      │Researcher│                    │ │
+│  │         └──────────┘                      └──────────┘                    │ │
+│  └───────────────────────────────────────────────────────────────────────────┘ │
+│                                 │                                               │
+│                                 ▼                                               │
+│  ┌───────────────────────────────────────────────────────────────────────────┐ │
+│  │                         TRADER                                             │ │
+│  │                  (BUY / SELL / HOLD)                                       │ │
+│  └───────────────────────────────────────────────────────────────────────────┘ │
+│                                 │                                               │
+│                                 ▼                                               │
+│  ┌───────────────────────────────────────────────────────────────────────────┐ │
+│  │                RISK MANAGEMENT (Debate - 3 rounds)                         │ │
+│  │    ┌─────────┐         ┌─────────┐         ┌─────────┐                    │ │
+│  │    │  RISKY  │◄───────►│ NEUTRAL │◄───────►│  SAFE   │                    │ │
+│  │    └─────────┘         └─────────┘         └─────────┘                    │ │
+│  └───────────────────────────────────────────────────────────────────────────┘ │
+│                                 │                                               │
+│                                 ▼                                               │
+│  ┌───────────────────────────────────────────────────────────────────────────┐ │
+│  │                       FUND MANAGER                                         │ │
+│  │                    (Final Approval)                                        │ │
+│  └───────────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────────┘
 """
 from __future__ import annotations
 
@@ -86,9 +96,10 @@ from agent.nodes import (
     # Trading flow (A2A)
     analysts_node,
     researchers_node,
-    risk_manager_node,
     trader_node,
-    format_trading_response,
+    risk_manager_node,
+    fund_manager_node,
+    format_final_trading_response,
 )
 
 
@@ -115,27 +126,13 @@ def route_after_router(state: AgentState) -> Literal["crypto", "fetcher", "tradi
         return "fetcher"
 
 
-def route_after_fetcher(state: AgentState) -> Literal["analyst", "analysts_team"]:
-    """
-    Route after fetcher based on query type.
-
-    Trading queries go to analysts_team (TradingAgents).
-    Standard queries go to simple analyst.
-    """
-    is_trading = state.get("is_trading_query", False)
-
-    if is_trading:
-        return "analysts_team"
-    return "analyst"
-
-
 def trading_composer_node(state: AgentState) -> dict:
     """
     Special composer for trading queries.
 
-    Uses the formatted trading response from the trader node.
+    Uses the formatted trading response including Fund Manager decision.
     """
-    response = format_trading_response(state)
+    response = format_final_trading_response(state)
 
     return {
         "response": response,
@@ -148,6 +145,14 @@ def build_graph() -> StateGraph:
     Build the LangGraph workflow with A2A support.
 
     Returns a compiled graph that handles both standard and trading queries.
+
+    Trading Flow (correct order per architecture):
+    1. Analysts Team (4 parallel analysts)
+    2. Research Team (Bull vs Bear - 3 rounds)
+    3. Trader (BUY/SELL/HOLD decision)
+    4. Risk Management (Risky/Neutral/Safe - 3 rounds)
+    5. Fund Manager (Final approval)
+    6. Trading Composer (Format response)
     """
     graph = StateGraph(AgentState)
 
@@ -164,10 +169,11 @@ def build_graph() -> StateGraph:
 
     # Trading flow nodes (A2A - TradingAgents)
     graph.add_node("trading_fetcher", fetcher_node)  # Same fetcher, different path
-    graph.add_node("analysts_team", analysts_node)
-    graph.add_node("researchers", researchers_node)
-    graph.add_node("risk_manager", risk_manager_node)
-    graph.add_node("trader", trader_node)
+    graph.add_node("analysts_team", analysts_node)   # 4 parallel analysts
+    graph.add_node("researchers", researchers_node)   # Bull vs Bear (3 rounds)
+    graph.add_node("trader", trader_node)             # Trading decision
+    graph.add_node("risk_manager", risk_manager_node) # Risk debate (3 rounds)
+    graph.add_node("fund_manager", fund_manager_node) # Final approval
     graph.add_node("trading_composer", trading_composer_node)
 
     # === Set entry point ===
@@ -192,11 +198,13 @@ def build_graph() -> StateGraph:
     graph.add_edge("composer", END)
 
     # === Trading flow edges (A2A) ===
+    # Correct order: analysts → researchers → trader → risk_manager → fund_manager → composer
     graph.add_edge("trading_fetcher", "analysts_team")
     graph.add_edge("analysts_team", "researchers")
-    graph.add_edge("researchers", "risk_manager")
-    graph.add_edge("risk_manager", "trader")
-    graph.add_edge("trader", "trading_composer")
+    graph.add_edge("researchers", "trader")
+    graph.add_edge("trader", "risk_manager")
+    graph.add_edge("risk_manager", "fund_manager")
+    graph.add_edge("fund_manager", "trading_composer")
     graph.add_edge("trading_composer", END)
 
     return graph.compile()

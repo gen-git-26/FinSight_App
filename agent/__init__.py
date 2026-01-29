@@ -2,30 +2,28 @@
 """
 FinSight Multi-Agent System
 
-Two modes of operation:
-1. Single Agent (legacy): Use build_agent() for the Agno-based agent
-2. Multi-Agent (new): Use run_query() for LangGraph-based multi-agent system
+LangGraph-based orchestration with A2A (Agent-to-Agent) architecture:
+- Standard Flow: Router → Fetcher/Crypto → Analyst → Composer
+- Trading Flow: Router → Fetcher → Analysts Team → Researchers → Trader → Risk Manager → Fund Manager → Composer
 """
-from agent.agent import build_agent
 from agent.graph import (
     build_graph,
     get_graph,
     run_query,
     run_query_async,
     stream_query,
+    reset_graph,
 )
 from agent.state import AgentState, ParsedQuery
 
 __all__ = [
-    # Legacy single agent
-    "build_agent",
-
     # Multi-agent system
     "build_graph",
     "get_graph",
     "run_query",
     "run_query_async",
     "stream_query",
+    "reset_graph",
 
     # State types
     "AgentState",

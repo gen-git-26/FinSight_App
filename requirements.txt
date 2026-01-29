@@ -16,3 +16,9 @@ websockets
 yfinance
 qdrant_client
 langgraph
+
+# Infrastructure
+redis
+psycopg2-binary
+loguru
+httpx
