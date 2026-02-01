@@ -10,7 +10,6 @@ from qdrant_client.http import models as rest
 from utils.config import load_settings
 
 
-
 def _rrf(lists: List[List[rest.ScoredPoint]], k: int = 60) -> List[rest.ScoredPoint]:
     scores: Dict[str, float] = {}
     pick: Dict[str, rest.ScoredPoint] = {}
@@ -21,7 +20,6 @@ def _rrf(lists: List[List[rest.ScoredPoint]], k: int = 60) -> List[rest.ScoredPo
             scores[pid] = scores.get(pid, 0.0) + 1.0 / (k + rank)
     order = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     return [pick[pid] for pid, _ in order]
-
 
 
 def _as_point_id(value: Any) -> Union[int, str]:
@@ -62,71 +60,71 @@ class HybridQdrant:
         self.collection = cfg.qdrant_collection
         self._ensured = False
 
-    
-def ensure_collections(self, dense_dim: Optional[int] = None) -> None:
-    if self._ensured:
-        return
+    def ensure_collections(self, dense_dim: Optional[int] = None) -> None:
+        if self._ensured:
+            return
 
-    colls = [c.name for c in self.client.get_collections().collections]
-    
-    # check existing collection
-    if self.collection in colls:
-        try:
-            info = self.client.get_collection(self.collection)
-            existing_dim = None
-            if hasattr(info, 'config') and hasattr(info.config, 'params'):
-                vectors = info.config.params.vectors
-                if isinstance(vectors, dict) and 'text' in vectors:
-                    existing_dim = vectors['text'].size
-            
-            # Check for dimension mismatch
-            if existing_dim and existing_dim != 3072:
-                print(f"[Qdrant] Deleting collection with mismatched dims: {existing_dim} → 3072")
-                self.client.delete_collection(self.collection)
-            else:
-                # build payload indices
-                for field, schema in [
-                    ("symbol", rest.PayloadSchemaType.KEYWORD),
-                    ("type", rest.PayloadSchemaType.KEYWORD),
-                    ("date", rest.PayloadSchemaType.TEXT),
-                    ("user", rest.PayloadSchemaType.KEYWORD),
-                ]:
-                    try:
-                        self.client.create_payload_index(self.collection, field_name=field, field_schema=schema)
-                    except Exception:
-                        pass
-                self._ensured = True
-                return
-        except Exception as e:
-            print(f"[Qdrant] Error checking collection: {e}")
+        colls = [c.name for c in self.client.get_collections().collections]
 
-    # create collection
-    self.client.recreate_collection(
-        collection_name=self.collection,
-        vectors_config={
-            "text": rest.VectorParams(size=3072, distance=rest.Distance.COSINE),
-        },
-        sparse_vectors_config={
-            "bm25": rest.SparseVectorParams(),
-        },
-    )
-    
-    for field, schema in [
-        ("symbol", rest.PayloadSchemaType.KEYWORD),
-        ("type", rest.PayloadSchemaType.KEYWORD),
-        ("date", rest.PayloadSchemaType.TEXT),
-        ("user", rest.PayloadSchemaType.KEYWORD),
-    ]:
-        try:
-            self.client.create_payload_index(self.collection, field_name=field, field_schema=schema)
-        except Exception:
-            pass
+        # check existing collection
+        if self.collection in colls:
+            try:
+                info = self.client.get_collection(self.collection)
+                existing_dim = None
+                if hasattr(info, 'config') and hasattr(info.config, 'params'):
+                    vectors = info.config.params.vectors
+                    if isinstance(vectors, dict) and 'text' in vectors:
+                        existing_dim = vectors['text'].size
 
-    self._ensured = True
+                # Check for dimension mismatch
+                if existing_dim and existing_dim != 3072:
+                    print(f"[Qdrant] Deleting collection with mismatched dims: {existing_dim} → 3072")
+                    self.client.delete_collection(self.collection)
+                else:
+                    # build payload indices
+                    for field, schema in [
+                        ("symbol", rest.PayloadSchemaType.KEYWORD),
+                        ("type", rest.PayloadSchemaType.KEYWORD),
+                        ("date", rest.PayloadSchemaType.TEXT),
+                        ("user", rest.PayloadSchemaType.KEYWORD),
+                    ]:
+                        try:
+                            self.client.create_payload_index(self.collection, field_name=field, field_schema=schema)
+                        except Exception:
+                            pass
+                    self._ensured = True
+                    return
+            except Exception as e:
+                print(f"[Qdrant] Error checking collection: {e}")
+
+        # create collection
+        self.client.recreate_collection(
+            collection_name=self.collection,
+            vectors_config={
+                "text": rest.VectorParams(size=3072, distance=rest.Distance.COSINE),
+            },
+            sparse_vectors_config={
+                "bm25": rest.SparseVectorParams(),
+            },
+        )
+
+        for field, schema in [
+            ("symbol", rest.PayloadSchemaType.KEYWORD),
+            ("type", rest.PayloadSchemaType.KEYWORD),
+            ("date", rest.PayloadSchemaType.TEXT),
+            ("user", rest.PayloadSchemaType.KEYWORD),
+        ]:
+            try:
+                self.client.create_payload_index(self.collection, field_name=field, field_schema=schema)
+            except Exception:
+                pass
+
+        self._ensured = True
+
     # --------- Upsert ---------
     async def upsert_snippets(self, items: List[Dict[str, Any]]) -> None:
         """Upserts a list of snippets into the Qdrant collection."""
-        from rag.embeddings import embed_texts, sparse_from_text  
+        from rag.embeddings import embed_texts, sparse_from_text
 
         self.ensure_collections()
 
@@ -136,7 +134,7 @@ def ensure_collections(self, dense_dim: Optional[int] = None) -> None:
         points: List[rest.PointStruct] = []
         for i, it in enumerate(items):
             raw_id = it.get("id") or f"snip-{i}"
-            pid = _as_point_id(raw_id)  
+            pid = _as_point_id(raw_id)
             payload = {
                 "text": texts[i],
                 "symbol": it.get("symbol", ""),

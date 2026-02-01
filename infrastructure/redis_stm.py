@@ -1,17 +1,22 @@
 # infrastructure/redis_stm.py
 """
-Redis Short-Term Memory (STM) - Fast session cache and temporary storage.
+Redis Short-Term Memory (STM) - Session and conversation memory.
 
 Use cases:
-- Session conversation history
-- Agent state caching
-- Temporary data between agents
-- Rate limiting / deduplication
+- Session state and conversation history
+- User preferences snapshot (with versioning for cache invalidation)
+- Recent context for follow-up questions
+- Rate limiting
+
+NOTE: Tool/API results caching is handled by RunCache (run_cache.py).
+This separation keeps STM focused on conversation context while RunCache
+handles A2A deduplication of data fetches.
 """
 from __future__ import annotations
 
 import os
 import json
+import time
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from datetime import timedelta
@@ -236,6 +241,46 @@ class RedisSTM:
         """Get cached query result."""
         return self.get(f"query:{query_hash}")
 
+    # === User Preferences Snapshot (with versioning) ===
+
+    def get_user_snapshot(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get cached user preferences snapshot.
+        Returns None if not cached or version outdated.
+        """
+        return self.get(f"user_snapshot:{user_id}")
+
+    def set_user_snapshot(
+        self,
+        user_id: str,
+        preferences: Dict[str, Any],
+        version: int,
+        ttl: int = 1800  # 30 minutes
+    ) -> bool:
+        """
+        Cache user preferences snapshot with version for invalidation.
+        """
+        data = {
+            "preferences": preferences,
+            "version": version,
+            "cached_at": time.time()
+        }
+        return self.set(f"user_snapshot:{user_id}", data, ttl)
+
+    def invalidate_user_snapshot(self, user_id: str) -> bool:
+        """Invalidate user snapshot (call when Postgres updates)."""
+        return self.delete(f"user_snapshot:{user_id}")
+
+    def check_snapshot_version(self, user_id: str, current_version: int) -> bool:
+        """
+        Check if cached snapshot is current version.
+        Returns True if valid, False if needs refresh.
+        """
+        snapshot = self.get_user_snapshot(user_id)
+        if not snapshot:
+            return False
+        return snapshot.get("version", -1) == current_version
+
     # === Rate Limiting ===
 
     def check_rate_limit(
@@ -262,6 +307,24 @@ class RedisSTM:
                 pass
 
         return True  # Allow if Redis not available
+
+    # === Context Summary ===
+
+    def get_context_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get session context summary (for efficient retrieval)."""
+        return self.get(f"context_summary:{session_id}")
+
+    def set_context_summary(
+        self,
+        session_id: str,
+        summary: Dict[str, Any],
+        ttl: int = 3600
+    ) -> bool:
+        """
+        Store session context summary.
+        Contains: recent_tickers, current_intent, key_facts.
+        """
+        return self.set(f"context_summary:{session_id}", summary, ttl)
 
 
 # Singleton instance
