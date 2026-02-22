@@ -29,6 +29,53 @@ TRADING_KEYWORDS = [
     'האם לקנות', 'האם למכור', 'המלצה', 'ניתוח', 'תחזית'
 ]
 
+# Trading subtype keywords for granular routing
+FUNDAMENTAL_KEYWORDS = [
+    'p/e', 'pe ratio', 'eps', 'earnings', 'revenue', 'profit',
+    'valuation', 'overvalued', 'undervalued', 'fundamentals',
+    'balance sheet', 'income statement', 'cash flow', 'debt',
+    'margin', 'growth rate', 'book value', 'dividend'
+]
+
+TECHNICAL_KEYWORDS = [
+    'rsi', 'macd', 'oversold', 'overbought', 'support', 'resistance',
+    'moving average', 'sma', 'ema', 'bollinger', 'volume',
+    'trend', 'breakout', 'chart', 'technical', 'indicator'
+]
+
+SENTIMENT_KEYWORDS = [
+    'sentiment', 'mood', 'feeling', 'outlook', 'opinion',
+    'bullish sentiment', 'bearish sentiment', 'fear', 'greed'
+]
+
+NEWS_KEYWORDS = [
+    'news', 'headline', 'announcement', 'press release',
+    'latest', 'recent', 'update', 'breaking'
+]
+
+
+def classify_trading_subtype(query: str) -> str:
+    """
+    Classify a trading query into a subtype for granular routing.
+
+    Returns one of: full_trading, fundamental, technical, sentiment, news
+    """
+    query_lower = query.lower()
+
+    if any(kw in query_lower for kw in FUNDAMENTAL_KEYWORDS):
+        return "fundamental"
+
+    if any(kw in query_lower for kw in TECHNICAL_KEYWORDS):
+        return "technical"
+
+    if any(kw in query_lower for kw in NEWS_KEYWORDS):
+        return "news"
+
+    if any(kw in query_lower for kw in SENTIMENT_KEYWORDS):
+        return "sentiment"
+
+    return "full_trading"
+
 
 ROUTER_PROMPT = """You are a financial query router. Analyze the query and determine:
 1. The type of query (stock, crypto, options, news, fundamentals, comparison, trading, general)
