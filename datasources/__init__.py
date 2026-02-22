@@ -48,6 +48,16 @@ class DataFetcher:
     3. Ingests data to RAG for future retrieval
     """
 
+    # MCP tool name mapping
+    MCP_TOOL_MAP = {
+        DataType.QUOTE: "get_stock_price",
+        DataType.PRICE: "get_stock_price",
+        DataType.FUNDAMENTALS: "get_stock_info",
+        DataType.NEWS: "get_news",
+        DataType.OPTIONS: "get_options_chain",
+        DataType.HISTORICAL: "get_historical_prices",
+    }
+
     def __init__(self, strategy: FetchStrategy = FetchStrategy.PREFER_API):
         self.strategy = strategy
         self.mcp = get_mcp_client()
@@ -62,6 +72,40 @@ class DataFetcher:
             self._rag_enabled = True
         except ImportError:
             self._rag_enabled = False
+
+    async def _fetch_via_mcp(
+        self,
+        symbol: str,
+        data_type: DataType,
+        **kwargs
+    ) -> Optional[DataResult]:
+        """Try to fetch data via MCP server."""
+        from datasources.mcp_client import setup_default_servers
+
+        # Ensure MCP servers are registered
+        setup_default_servers(use_local=True)
+
+        tool_name = self.MCP_TOOL_MAP.get(data_type)
+        if not tool_name:
+            return None
+
+        try:
+            # Try yfinance MCP server
+            result = await self.mcp.call_tool(
+                "yfinance",
+                tool_name,
+                {"ticker": symbol, **kwargs}
+            )
+
+            if result.success:
+                result.data_type = data_type
+                print(f"[DataFetcher] MCP success for {symbol}")
+                return result
+
+        except Exception as e:
+            print(f"[DataFetcher] MCP fetch failed: {e}")
+
+        return None
 
     async def fetch(
         self,
@@ -115,6 +159,13 @@ class DataFetcher:
         **kwargs
     ) -> DataResult:
         """Fetch stock data with fallback chain."""
+        # Try MCP first if preferred
+        if self.strategy == FetchStrategy.PREFER_MCP:
+            mcp_result = await self._fetch_via_mcp(symbol, data_type, **kwargs)
+            if mcp_result and mcp_result.success:
+                return mcp_result
+
+        # Fallback to API clients
         clients_order = ["yfinance", "finnhub", "alphavantage"]
 
         for client_name in clients_order:
