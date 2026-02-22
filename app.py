@@ -14,6 +14,7 @@ dotenv.load_dotenv()
 
 # New multi-agent system
 from agent.graph import run_query, stream_query, get_graph
+from agent.nodes.router import classify_trading_subtype, TRADING_KEYWORDS
 
 # -----------------------------
 # Theme & assets
@@ -133,12 +134,15 @@ with st.sidebar:
     **Standard Flow:**
     - Router → Fetcher/Crypto → Analyst → Composer
 
-    **Trading Flow (A2A):**
-    - 4 Analysts (Fundamental, Sentiment, News, Technical)
-    - Bull vs Bear Research (3 rounds)
-    - Trader Decision (BUY/SELL/HOLD)
-    - Risk Management (3 rounds)
-    - Fund Manager Approval
+    **Granular Trading Flow:**
+    - "What's the P/E?" → Fundamental Analyst only
+    - "Is it oversold?" → Technical Analyst only
+    - "Any news?" → News Analyst only
+    - "What's the sentiment?" → Sentiment Analyst only
+
+    **Full Trading Flow (A2A):**
+    - "Should I buy AAPL?" triggers all 6 agents:
+    - 4 Analysts → Bull vs Bear → Trader → Risk → Fund Manager
     """)
 
     st.divider()
@@ -205,30 +209,48 @@ if prompt:
     # Process with multi-agent system
     with st.chat_message("assistant", avatar=BOT_ICON_PATH):
         try:
-            # Show progress for trading queries
-            trading_keywords = ["buy", "sell", "trade", "invest", "should i", "trading", "position"]
-            is_trading = any(kw in prompt.lower() for kw in trading_keywords)
+            # Detect query type for appropriate progress indicator
+            prompt_lower = prompt.lower()
+            is_trading = any(kw in prompt_lower for kw in TRADING_KEYWORDS)
 
             if is_trading:
-                # Show trading flow progress
+                # Determine if granular or full trading flow
+                trading_subtype = classify_trading_subtype(prompt)
+                is_granular = trading_subtype != "full_trading"
+
                 progress_placeholder = st.empty()
                 with progress_placeholder.container():
-                    st.info("Processing with TradingAgents A2A flow...")
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
+                    if is_granular:
+                        # Granular flow: single analyst
+                        analyst_name = trading_subtype.title()
+                        st.info(f"Running {analyst_name} Analysis...")
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
 
-                    stages = [
-                        (10, "Routing query..."),
-                        (20, "Fetching market data..."),
-                        (40, "Running 4 analyst reports..."),
-                        (60, "Bull vs Bear research debate..."),
-                        (70, "Trader making decision..."),
-                        (85, "Risk management assessment..."),
-                        (95, "Fund manager approval..."),
-                        (100, "Composing response...")
-                    ]
+                        stages = [
+                            (20, "Routing query..."),
+                            (50, "Fetching market data..."),
+                            (80, f"Running {analyst_name} Analyst..."),
+                            (100, "Composing response...")
+                        ]
+                    else:
+                        # Full A2A trading flow
+                        st.info("Processing with Full TradingAgents A2A flow...")
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
 
-                    # Simulate progress (actual processing happens in run_query)
+                        stages = [
+                            (10, "Routing query..."),
+                            (20, "Fetching market data..."),
+                            (40, "Running 4 analyst reports..."),
+                            (60, "Bull vs Bear research debate..."),
+                            (70, "Trader making decision..."),
+                            (85, "Risk management assessment..."),
+                            (95, "Fund manager approval..."),
+                            (100, "Composing response...")
+                        ]
+
+                    # Simulate initial progress
                     import time
                     for pct, msg in stages[:2]:
                         progress_bar.progress(pct)
