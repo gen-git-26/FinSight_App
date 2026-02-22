@@ -58,7 +58,7 @@ class DataFetcher:
         DataType.HISTORICAL: "get_historical_prices",
     }
 
-    def __init__(self, strategy: FetchStrategy = FetchStrategy.PREFER_API):
+    def __init__(self, strategy: FetchStrategy = FetchStrategy.PREFER_MCP):
         self.strategy = strategy
         self.mcp = get_mcp_client()
         self._rag_enabled = False
