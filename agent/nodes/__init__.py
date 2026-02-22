@@ -20,7 +20,15 @@ from .analyst import analyst_node
 from .composer import composer_node
 
 # TradingAgents nodes (A2A)
-from .analysts import analysts_node, news_analyst
+from .analysts import (
+    analysts_node,
+    news_analyst,
+    single_fundamental_node,
+    single_technical_node,
+    single_sentiment_node,
+    single_news_node,
+)
+from .router import classify_trading_subtype
 from .researchers import researchers_node
 from .trader import trader_node, format_trading_response
 from .risk_manager import risk_manager_node
@@ -43,4 +51,11 @@ __all__ = [
     "fund_manager_node",
     "format_trading_response",
     "format_final_trading_response",
+
+    # Single analyst nodes (granular routing)
+    "single_fundamental_node",
+    "single_technical_node",
+    "single_sentiment_node",
+    "single_news_node",
+    "classify_trading_subtype",
 ]
