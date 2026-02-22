@@ -247,3 +247,75 @@ def analysts_node(state: AgentState) -> Dict[str, Any]:
     return {
         "analyst_reports": reports
     }
+
+
+# === Single Analyst Nodes (for granular routing) ===
+
+def single_fundamental_node(state: AgentState) -> Dict[str, Any]:
+    """Run only the Fundamental Analyst."""
+    parsed_query = state.get("parsed_query")
+    fetched_data = state.get("fetched_data", [])
+    query = parsed_query.raw_query if parsed_query else state.get("query", "")
+
+    combined_data = {}
+    for d in fetched_data:
+        if not d.error and d.parsed_data:
+            combined_data[d.source] = d.parsed_data
+
+    report = fundamental_analyst(combined_data, query)
+    print(f"[Single Analyst] Fundamental: {report.recommendation} ({report.confidence:.0%})")
+
+    return {"analyst_reports": [report]}
+
+
+def single_technical_node(state: AgentState) -> Dict[str, Any]:
+    """Run only the Technical Analyst."""
+    parsed_query = state.get("parsed_query")
+    fetched_data = state.get("fetched_data", [])
+    query = parsed_query.raw_query if parsed_query else state.get("query", "")
+
+    combined_data = {}
+    for d in fetched_data:
+        if not d.error and d.parsed_data:
+            combined_data[d.source] = d.parsed_data
+
+    report = technical_analyst(combined_data, query)
+    print(f"[Single Analyst] Technical: {report.recommendation} ({report.confidence:.0%})")
+
+    return {"analyst_reports": [report]}
+
+
+def single_sentiment_node(state: AgentState) -> Dict[str, Any]:
+    """Run Sentiment + News Analysts together."""
+    parsed_query = state.get("parsed_query")
+    fetched_data = state.get("fetched_data", [])
+    query = parsed_query.raw_query if parsed_query else state.get("query", "")
+
+    combined_data = {}
+    for d in fetched_data:
+        if not d.error and d.parsed_data:
+            combined_data[d.source] = d.parsed_data
+
+    sentiment_report = sentiment_analyst(combined_data, query)
+    news_report = news_analyst(combined_data, query)
+
+    print(f"[Single Analyst] Sentiment: {sentiment_report.recommendation}, News: {news_report.recommendation}")
+
+    return {"analyst_reports": [sentiment_report, news_report]}
+
+
+def single_news_node(state: AgentState) -> Dict[str, Any]:
+    """Run only the News Analyst."""
+    parsed_query = state.get("parsed_query")
+    fetched_data = state.get("fetched_data", [])
+    query = parsed_query.raw_query if parsed_query else state.get("query", "")
+
+    combined_data = {}
+    for d in fetched_data:
+        if not d.error and d.parsed_data:
+            combined_data[d.source] = d.parsed_data
+
+    report = news_analyst(combined_data, query)
+    print(f"[Single Analyst] News: {report.recommendation} ({report.confidence:.0%})")
+
+    return {"analyst_reports": [report]}
