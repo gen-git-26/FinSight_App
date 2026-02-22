@@ -10,6 +10,7 @@ from typing import Dict, Any, List
 
 from agent.state import AgentState, AnalysisResult, FetchedData
 from utils.config import load_settings
+from evaluation.metrics import track_metrics
 
 
 ANALYST_PROMPT = """You are a financial analyst. Analyze the provided data and generate insights.
@@ -153,6 +154,7 @@ def _basic_analysis(data: List[FetchedData]) -> AnalysisResult:
     )
 
 
+@track_metrics("analyst")
 def analyst_node(state: AgentState) -> Dict[str, Any]:
     """
     Analyst node - analyzes the fetched data.

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from agent.state import AgentState, FetchedData
 from utils.config import load_settings
+from evaluation.metrics import track_metrics
 
 
 @dataclass
@@ -201,6 +202,7 @@ def news_analyst(data: Dict[str, Any], query: str) -> AnalystReport:
     return _run_analyst("news", NEWS_ANALYST_PROMPT, data, query)
 
 
+@track_metrics("analysts_team")
 def analysts_node(state: AgentState) -> Dict[str, Any]:
     """
     Analysts Team node - runs all analysts in parallel.
@@ -265,6 +267,7 @@ def _prepare_analyst_data(state: AgentState) -> tuple:
     return query, combined_data
 
 
+@track_metrics("single_fundamental")
 def single_fundamental_node(state: AgentState) -> Dict[str, Any]:
     """Run only the Fundamental Analyst."""
     query, combined_data = _prepare_analyst_data(state)
@@ -273,6 +276,7 @@ def single_fundamental_node(state: AgentState) -> Dict[str, Any]:
     return {"analyst_reports": [report]}
 
 
+@track_metrics("single_technical")
 def single_technical_node(state: AgentState) -> Dict[str, Any]:
     """Run only the Technical Analyst."""
     query, combined_data = _prepare_analyst_data(state)
@@ -281,6 +285,7 @@ def single_technical_node(state: AgentState) -> Dict[str, Any]:
     return {"analyst_reports": [report]}
 
 
+@track_metrics("single_sentiment")
 def single_sentiment_node(state: AgentState) -> Dict[str, Any]:
     """Run Sentiment + News Analysts together."""
     query, combined_data = _prepare_analyst_data(state)
@@ -290,6 +295,7 @@ def single_sentiment_node(state: AgentState) -> Dict[str, Any]:
     return {"analyst_reports": [sentiment_report, news_report]}
 
 
+@track_metrics("single_news")
 def single_news_node(state: AgentState) -> Dict[str, Any]:
     """Run only the News Analyst."""
     query, combined_data = _prepare_analyst_data(state)

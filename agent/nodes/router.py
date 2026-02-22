@@ -17,6 +17,7 @@ from typing import Dict, Any
 from agent.state import AgentState, ParsedQuery
 from utils.config import load_settings
 from infrastructure.redis_stm import get_stm
+from evaluation.metrics import track_metrics
 
 
 # Trading-related keywords for A2A routing
@@ -126,6 +127,7 @@ Examples:
 """
 
 
+@track_metrics("router")
 def router_node(state: AgentState) -> Dict[str, Any]:
     """
     Router node - analyzes the query and decides routing.
