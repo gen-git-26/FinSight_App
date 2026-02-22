@@ -100,28 +100,50 @@ from agent.nodes import (
     risk_manager_node,
     fund_manager_node,
     format_final_trading_response,
+    # Single analyst nodes (granular routing)
+    single_fundamental_node,
+    single_technical_node,
+    single_sentiment_node,
+    single_news_node,
+    classify_trading_subtype,
 )
 
 
-def route_after_router(state: AgentState) -> Literal["crypto", "fetcher", "trading_fetcher", "composer"]:
+def route_after_router(state: AgentState) -> Literal[
+    "crypto", "fetcher", "trading_fetcher", "composer",
+    "single_fundamental_fetch", "single_technical_fetch",
+    "single_sentiment_fetch", "single_news_fetch"
+]:
     """
     Primary routing function after router.
 
-    Determines if this is:
-    - A trading query → trading_fetcher (A2A flow)
-    - A crypto query → crypto
-    - A general query → composer
+    Determines routing based on query type:
+    - Crypto query → crypto
+    - General query → composer
+    - Trading query → granular routing to specific analyst OR full A2A flow
     - Other → fetcher (standard flow)
     """
     next_agent = state.get("next_agent", "fetcher")
     is_trading = state.get("is_trading_query", False)
+    query = state.get("query", "")
 
-    if is_trading or next_agent == "trading":
-        return "trading_fetcher"
-    elif next_agent == "crypto":
+    if next_agent == "crypto":
         return "crypto"
     elif next_agent == "composer":
         return "composer"
+    elif is_trading or next_agent == "trading":
+        # Granular trading routing
+        subtype = classify_trading_subtype(query)
+        if subtype == "fundamental":
+            return "single_fundamental_fetch"
+        elif subtype == "technical":
+            return "single_technical_fetch"
+        elif subtype == "sentiment":
+            return "single_sentiment_fetch"
+        elif subtype == "news":
+            return "single_news_fetch"
+        else:
+            return "trading_fetcher"  # full A2A flow
     else:
         return "fetcher"
 
@@ -176,6 +198,16 @@ def build_graph() -> StateGraph:
     graph.add_node("fund_manager", fund_manager_node) # Final approval
     graph.add_node("trading_composer", trading_composer_node)
 
+    # Single analyst nodes (for granular routing)
+    graph.add_node("single_fundamental_fetch", fetcher_node)
+    graph.add_node("single_fundamental", single_fundamental_node)
+    graph.add_node("single_technical_fetch", fetcher_node)
+    graph.add_node("single_technical", single_technical_node)
+    graph.add_node("single_sentiment_fetch", fetcher_node)
+    graph.add_node("single_sentiment", single_sentiment_node)
+    graph.add_node("single_news_fetch", fetcher_node)
+    graph.add_node("single_news", single_news_node)
+
     # === Set entry point ===
     graph.set_entry_point("router")
 
@@ -187,7 +219,11 @@ def build_graph() -> StateGraph:
             "crypto": "crypto",
             "fetcher": "fetcher",
             "trading_fetcher": "trading_fetcher",
-            "composer": "composer"
+            "composer": "composer",
+            "single_fundamental_fetch": "single_fundamental_fetch",
+            "single_technical_fetch": "single_technical_fetch",
+            "single_sentiment_fetch": "single_sentiment_fetch",
+            "single_news_fetch": "single_news_fetch",
         }
     )
 
@@ -206,6 +242,16 @@ def build_graph() -> StateGraph:
     graph.add_edge("risk_manager", "fund_manager")
     graph.add_edge("fund_manager", "trading_composer")
     graph.add_edge("trading_composer", END)
+
+    # === Single analyst flow edges (skip debate, go to composer) ===
+    graph.add_edge("single_fundamental_fetch", "single_fundamental")
+    graph.add_edge("single_fundamental", "composer")
+    graph.add_edge("single_technical_fetch", "single_technical")
+    graph.add_edge("single_technical", "composer")
+    graph.add_edge("single_sentiment_fetch", "single_sentiment")
+    graph.add_edge("single_sentiment", "composer")
+    graph.add_edge("single_news_fetch", "single_news")
+    graph.add_edge("single_news", "composer")
 
     return graph.compile()
 
