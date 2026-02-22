@@ -60,6 +60,39 @@ class HybridQdrant:
         self.collection = cfg.qdrant_collection
         self._ensured = False
 
+    def health_check(self) -> Dict[str, Any]:
+        """
+        Check Qdrant connection and collection status.
+
+        Returns:
+            Dict with connection status and collection info
+        """
+        result = {
+            "connected": False,
+            "collection_exists": False,
+            "collection_name": self.collection,
+            "point_count": 0,
+            "error": None
+        }
+
+        try:
+            # Test connection
+            collections = self.client.get_collections()
+            result["connected"] = True
+
+            # Check if our collection exists
+            collection_names = [c.name for c in collections.collections]
+            result["collection_exists"] = self.collection in collection_names
+
+            if result["collection_exists"]:
+                info = self.client.get_collection(self.collection)
+                result["point_count"] = info.points_count
+
+        except Exception as e:
+            result["error"] = str(e)
+
+        return result
+
     def ensure_collections(self, dense_dim: Optional[int] = None) -> None:
         if self._ensured:
             return
