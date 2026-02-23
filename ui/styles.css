@@ -1,0 +1,285 @@
+/* ======================================================
+   FinSight Design System — Global CSS
+   Covers: typography, cards, layout, buttons, states.
+   Injected via st.html() in ui/skeleton.py
+   ====================================================== */
+
+/* -- 1. CSS custom properties -------------------------------- */
+:root {
+  --bg:        #0D0F10;
+  --card:      #181C1F;
+  --card-hi:   #1D2226;
+  --border:    #252B2E;
+  --mint:      #9AF8CC;
+  --action:    #0E8A5C;
+  --text:      #FFFFFF;
+  --muted:     #8A9BA8;
+  --subtle:    #526070;
+  --pos:       #9AF8CC;
+  --warn:      #F59E0B;
+  --neg:       #FB7185;
+  --r-sm:      8px;
+  --r-md:      12px;
+  --r-lg:      16px;
+  --r-xl:      20px;
+}
+
+/* -- 2. Base ------------------------------------------------- */
+.stApp {
+  background: var(--bg) !important;
+}
+
+/* Remove Streamlit's default top gap so the header starts cleanly */
+header[data-testid="stHeader"] {
+  background: transparent !important;
+  height: 0 !important;
+}
+#stDecoration { display: none !important; }
+
+/* -- 3. Content max-width + centering ----------------------- */
+.block-container {
+  max-width: 900px !important;
+  margin-inline: auto !important;
+  padding: 1.5rem 2rem 3rem !important;
+}
+
+/* -- 4. Typography ------------------------------------------ */
+h1 { font-weight: 800 !important; letter-spacing: -0.5px; }
+h2, h3 { font-weight: 700 !important; }
+h4, h5 { font-weight: 600 !important; }
+
+.stMarkdown p {
+  color: var(--muted);
+  line-height: 1.75;
+}
+
+.stCaption,
+[data-testid="stCaptionContainer"] p {
+  color: var(--subtle) !important;
+}
+
+code, pre,
+[data-testid="stCodeBlock"],
+[data-testid="stJson"] {
+  direction: ltr !important;
+  text-align: left !important;
+}
+
+/* -- 5. Header ---------------------------------------------- */
+.fs-header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1.5rem;
+  margin-bottom: 1.75rem;
+}
+
+/* -- 6. Chat messages --------------------------------------- */
+[data-testid="stChatMessage"] {
+  background: var(--card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--r-lg) !important;
+  margin-bottom: 0.75rem;
+  padding: 1rem 1.25rem;
+}
+
+/* User bubble — slightly elevated */
+[data-testid="stChatMessage"][data-testid*="user"] {
+  background: var(--card-hi) !important;
+}
+
+/* -- 7. Chat avatar — larger and crisp ---------------------- */
+/*
+  Streamlit renders chat avatars inside a small wrapper.
+  We enlarge the container and force the image to fill it cleanly.
+*/
+[data-testid="stChatMessageAvatarImage"],
+.stChatMessageAvatarImage {
+  width:  52px !important;
+  height: 52px !important;
+  min-width: 52px !important;
+  object-fit: cover !important;
+  border-radius: 50% !important;
+  /* High-quality downscaling */
+  image-rendering: auto !important;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+/* Avatar outer container — give it room */
+[data-testid="stChatMessage"] > div:first-child,
+.stChatMessageAvatar {
+  width: 52px !important;
+  min-width: 52px !important;
+  height: 52px !important;
+  flex-shrink: 0 !important;
+  align-self: flex-start !important;
+}
+
+/* -- 8. Chat input (primary CTA) ---------------------------- */
+[data-testid="stChatInput"] > div {
+  border: 2px solid var(--border) !important;
+  border-radius: var(--r-xl) !important;
+  background: var(--card) !important;
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+[data-testid="stChatInput"]:focus-within > div {
+  border-color: var(--mint) !important;
+  box-shadow: 0 0 0 3px rgba(154, 248, 204, 0.12) !important;
+}
+
+.stChatInput textarea {
+  color: var(--text) !important;
+  font-size: 15px !important;
+  line-height: 1.6 !important;
+}
+.stChatInput textarea::placeholder {
+  color: var(--subtle) !important;
+}
+
+/* -- 9. Buttons --------------------------------------------- */
+[data-testid="stBaseButton-primary"] {
+  background: var(--action) !important;
+  border: none !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+  border-radius: var(--r-md) !important;
+  transition: all 160ms ease !important;
+}
+[data-testid="stBaseButton-primary"]:hover {
+  background: #10a06c !important;
+  box-shadow: 0 4px 20px rgba(14, 138, 92, 0.4) !important;
+  transform: translateY(-1px);
+}
+
+[data-testid="stBaseButton-secondary"] {
+  background: transparent !important;
+  border: 1px solid var(--border) !important;
+  color: var(--muted) !important;
+  border-radius: var(--r-md) !important;
+  transition: all 160ms ease !important;
+}
+[data-testid="stBaseButton-secondary"]:hover {
+  border-color: var(--mint) !important;
+  color: var(--mint) !important;
+  background: rgba(154, 248, 204, 0.06) !important;
+}
+
+/* Kill residual red on icon buttons */
+[data-testid="stBaseButton-headerNoPadding"] {
+  color: var(--muted) !important;
+}
+[data-testid="stBaseButton-headerNoPadding"]:hover {
+  color: var(--neg) !important;
+  background: rgba(251, 113, 133, 0.08) !important;
+}
+
+/* -- 10. Expanders ------------------------------------------ */
+[data-testid="stExpander"] {
+  background: var(--card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--r-md) !important;
+  overflow: hidden;
+}
+[data-testid="stExpander"] summary {
+  padding: 0.875rem 1rem;
+  font-weight: 500;
+  color: var(--text) !important;
+}
+[data-testid="stExpander"] summary:hover {
+  background: var(--card-hi) !important;
+}
+
+/* -- 11. Bordered containers -------------------------------- */
+[data-testid="stVerticalBlockBorderWrapper"] > div {
+  background: var(--card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--r-md) !important;
+}
+
+/* -- 12. Sidebar -------------------------------------------- */
+[data-testid="stSidebar"] {
+  background: #090B0C !important;
+}
+
+/* -- 13. Pills / suggestion chips --------------------------- */
+[data-testid="stPills"] button {
+  border: 1px solid var(--border) !important;
+  background: var(--card) !important;
+  color: var(--muted) !important;
+  border-radius: var(--r-xl) !important;
+  transition: all 140ms ease !important;
+}
+[data-testid="stPills"] button:hover,
+[data-testid="stPills"] button[aria-checked="true"] {
+  border-color: var(--mint) !important;
+  color: var(--text) !important;
+  background: rgba(154, 248, 204, 0.08) !important;
+}
+
+/* -- 14. Scrollbar ------------------------------------------ */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(154, 248, 204, 0.35);
+}
+
+/* -- 15. Loading animation (mint pulse) --------------------- */
+@keyframes mintPulse {
+  0%, 100% { opacity: 0.2; transform: scale(0.75); }
+  50%       { opacity: 1;   transform: scale(1);    }
+}
+
+.fs-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+}
+.fs-loading__dots {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.fs-loading__dots span {
+  width: 7px;
+  height: 7px;
+  background: var(--mint);
+  border-radius: 50%;
+  animation: mintPulse 1.5s ease-in-out infinite;
+}
+.fs-loading__dots span:nth-child(2) { animation-delay: 0.25s; }
+.fs-loading__dots span:nth-child(3) { animation-delay: 0.50s; }
+.fs-loading__label {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-family: 'Heebo', sans-serif;
+}
+
+/* -- 16. Empty / welcome state ------------------------------ */
+.fs-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 2rem 2rem;
+  gap: 1rem;
+}
+.fs-welcome__title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0;
+  letter-spacing: -0.3px;
+}
+.fs-welcome__sub {
+  font-size: 0.95rem;
+  color: var(--muted);
+  margin: 0;
+  text-align: center;
+  max-width: 420px;
+  line-height: 1.6;
+}

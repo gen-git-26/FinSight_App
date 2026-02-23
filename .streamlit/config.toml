@@ -1,0 +1,55 @@
+[theme]
+base = "dark"
+
+# Core palette
+primaryColor             = "#0E8A5C"   # WCAG AA on white (5.0:1 contrast)
+backgroundColor          = "#0D0F10"
+secondaryBackgroundColor = "#181C1F"   # elevated card surface
+textColor                = "#FFFFFF"
+linkColor                = "#9AF8CC"
+borderColor              = "#252B2E"
+
+# Widget appearance
+showWidgetBorder  = true
+showSidebarBorder = false
+baseRadius        = "10px"
+buttonRadius      = "10px"
+linkUnderline     = false
+
+# Typography — Heebo: modern geometric sans with broad Latin support
+font        = "'Heebo':https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap"
+headingFont = "'Heebo':https://fonts.googleapis.com/css2?family=Heebo:wght@700;800&display=swap"
+codeFont    = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+
+baseFontSize    = 15
+baseFontWeight  = 400
+codeFontSize    = "13px"
+codeFontWeight  = 400
+
+headingFontSizes   = ["30px", "22px", "18px", "16px", "14px", "12px"]
+headingFontWeights = [800, 700, 600, 600, 500, 500]
+
+# Semantic status colors (no pure red in the brand)
+greenColor  = "#9AF8CC"   # mint = brand positive
+blueColor   = "#38BDF8"
+orangeColor = "#F59E0B"
+violetColor = "#A78BFA"
+grayColor   = "#8A9BA8"
+redColor    = "#FB7185"   # rose-pink replaces harsh red
+
+# Chart color sequence
+chartCategoricalColors = [
+  "#9AF8CC", "#38BDF8", "#F59E0B",
+  "#A78BFA", "#FB7185", "#34D399", "#60A5FA"
+]
+
+# Dataframes
+dataframeBorderColor           = "#252B2E"
+dataframeHeaderBackgroundColor = "#181C1F"
+
+[theme.sidebar]
+backgroundColor          = "#090B0C"
+secondaryBackgroundColor = "#121416"
+textColor                = "#FFFFFF"
+borderColor              = "#1E2327"
+primaryColor             = "#9AF8CC"   # active nav / widget accent
