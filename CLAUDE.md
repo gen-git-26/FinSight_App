@@ -149,23 +149,23 @@ Query → 2-Stage Classifier → Route to minimal layers → Race pattern fetch 
 - RAG ingestion (DataFetcher → Qdrant on every successful fetch)
 - Redis STM (router reads, composer writes)
 - Streamlit UI
+- FastAPI wrapper (`api.py`) — GET /health, POST /api/query
+- Docker + supervisord deployment (FastAPI :8000 + Streamlit :8502)
+- `MemoryManager.get_context()` — called in `router_node`, enriches LLM prompt; `run_id` + `memory_context` flow through `AgentState`
+- `RunCache` — checked/written in `fetcher_node` to deduplicate A2A data fetches
+- `MemoryManager.store_decision()` + `store_message()` — called in `fund_manager_node` after final approval
+- RAG retrieval — `rag_chunks` from `memory_context` injected into all 4 analyst system prompts
 
 ### ❌ Built but NOT Yet Connected to Agents
-- `MemoryManager` — exists, not called by agent nodes
-- `QueryClassifier` — exists, not used by router
-- `RunCache` — exists, not used in A2A flow
-- `PostgreSQL LTM` — exists, requires `DATABASE_URL` in `.env`
-- `PostgresSummaries` — exists, not called after trading decisions
-- `RAG retrieval` — ingestion works, retrieval not used in agent prompts
+- `QueryClassifier` — exists, not used by router (LLM + keyword fallback still used)
+- `PostgreSQL LTM` — exists, requires `DATABASE_URL` in `.env`; `store_decision()` calls it but degrades gracefully without it
+- `PostgresSummaries` — exists, called by `store_decision()` but requires Postgres
 - MCP servers — code exists, not added to DataFetcher fallback chain
 
 ### Next Integration Steps (Priority Order)
-1. **P1**: Add `DATABASE_URL` to `.env` and initialize Postgres on startup
-2. **P1**: Call `memory_manager.get_context()` in `router_node` and pass to state
-3. **P1**: Call `memory_manager.store_decision()` in `fund_manager_node`
-4. **P2**: Check `RunCache` in `fetcher_node` before API calls (A2A deduplication)
-5. **P2**: Pass RAG context chunks into analyst LLM prompts
-6. **P2**: Replace router classification with `QueryClassifier`
+1. **P1**: Add `DATABASE_URL` to `.env` and initialize Postgres on startup (unlocks LTM + summaries)
+2. **P2**: Replace router classification with `QueryClassifier`
+3. **P3**: Add MCP servers to DataFetcher fallback chain
 
 ## Environment Variables
 
