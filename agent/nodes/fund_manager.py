@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from agent.state import AgentState
 from utils.config import load_settings
+from infrastructure.memory_manager import get_memory_manager
 
 
 @dataclass
@@ -87,7 +88,7 @@ Risk Approved: {risk_approved}
 """
 
 
-def fund_manager_node(state: AgentState) -> Dict[str, Any]:
+async def fund_manager_node(state: AgentState) -> Dict[str, Any]:
     """
     Fund Manager node - final approval authority.
 
@@ -196,6 +197,36 @@ def fund_manager_node(state: AgentState) -> Dict[str, Any]:
     print(f"[Fund Manager] Final Action: {decision.final_action}")
     print(f"[Fund Manager] Confidence: {decision.confidence:.0%}")
     print(f"{'='*50}\n")
+
+    # Persist decision to memory
+    user_id = state.get("user_id", "default")
+    query = state.get("query", "")
+    run_id = state.get("run_id")
+    manager = get_memory_manager()
+    decision_dict = {
+        "action": decision.final_action,
+        "status": decision.status,
+        "position_size": decision.final_position_size,
+        "stop_loss": decision.final_stop_loss,
+        "take_profit": decision.final_take_profit,
+        "confidence": decision.confidence,
+    }
+    try:
+        await manager.store_decision(
+            user_id=user_id,
+            ticker=ticker,
+            query=query,
+            decision=decision_dict,
+            run_id=run_id,
+        )
+        await manager.store_message(
+            session_id=user_id,
+            user_id=user_id,
+            role="assistant",
+            content=f"Fund Manager decision for {ticker}: {decision.status} — {decision.final_action}",
+        )
+    except Exception as e:
+        print(f"[Fund Manager] Memory store failed: {e}")
 
     return {
         "fund_manager_decision": decision
