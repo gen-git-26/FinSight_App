@@ -1,203 +1,252 @@
-# FinSight 💹
+# FinSight
 
-**See Beyond The Numbers** - Smart Financial Agent with Real-Time Market Data
+**Multi-Agent Financial Analysis System**
 
-<div align="center">
-
-
-An intelligent financial analysis agent that provides real-time market data, options analysis, fundamental research, and multi-company comparisons through a beautiful Streamlit interface.
-
-[Features](#features) • [Installation](#installation) • [Configuration](#configuration) • [Usage](#usage) • [Architecture](#architecture)
-
-</div>
+FinSight is a production-grade financial intelligence platform that orchestrates multiple specialized AI agents to deliver real-time market data, options analysis, fundamental research, and trade recommendations. Built on LangGraph with a Streamlit interface.
 
 ---
 
-##  Features
+## Overview
 
-### Core Capabilities
-- **Smart Query Understanding**: Natural language processing with LLM-powered ticker extraction
-- **Multi-Ticker Comparison**: Compare financial metrics across multiple companies simultaneously
-- **Real-Time Market Data**: Live stock prices, crypto quotes, and market information
-- **News & Sentiment**: Latest financial news and market updates
-- **Options Analysis**: Options chains, expiration dates, and derivatives data
-- **Fundamental Analysis**: Balance sheets, income statements, cash flow analysis
-- **Dynamic Routing**: Automatically selects the best data source for each query
+Most financial AI tools are single-agent wrappers around a data API. FinSight is different: it uses a graph-based multi-agent architecture where each agent has a defined role and queries are routed through the appropriate pipeline depending on their nature.
 
-
-### Supported Queries
-```
-✅ "Tesla stock price"
-✅ "Compare the quarterly income statements of Amazon and Google"
-✅ "AAPL options for 2024-12-20"
-✅ "Meta Platforms news"
-✅ "Bitcoin price"
-✅ "What are the key financial metrics for Tesla"
-✅ "NVDA vs AMD comparison"
-```
+A price inquiry and a trade decision are handled by fundamentally different execution paths — the system knows the difference and applies the right depth of analysis for each.
 
 ---
 
-## 🚀 Installation
+## Key Capabilities
+
+- **Dual query pipeline** — standard info queries and full trading analysis run on separate, optimized paths
+- **Agent-to-Agent (A2A) trading flow** — four parallel analysts, bull/bear researcher debate, independent risk assessment
+- **Multi-layer memory** — Redis (session), PostgreSQL (long-term), Qdrant (semantic retrieval), and in-run tool cache
+- **Resilient data fetching** — automatic fallback chain across yfinance, Finnhub, and Alpha Vantage
+- **MCP-native data layer** — local FastMCP servers for yfinance and Financial Datasets API
+- **RAG integration** — every successful data fetch is ingested into a hybrid dense/sparse vector store
+
+---
+
+## Query Flows
+
+### Standard Flow
+
+Used for informational queries: price checks, news, fundamental data, crypto quotes.
+
+```
+router → fetcher / crypto → analyst → composer → response
+```
+
+### Trading Flow (A2A)
+
+Triggered by trading intent: buy/sell decisions, investment recommendations, forecasts.
+
+```
+router → fetcher
+       → analysts_team (4 agents, parallel)
+       → researchers (bull/bear debate, 3 rounds)
+       → trader (BUY / SELL / HOLD)
+       → risk_manager (3 personas, 3 rounds)
+       → fund_manager
+       → composer → response
+```
+
+**Routing logic** — the router uses LLM-based intent detection with keyword fallback:
+
+| Signal | Destination |
+|--------|-------------|
+| "buy", "sell", "should I", "invest", "forecast" | Trading flow |
+| BTC, ETH, bitcoin, ethereum, crypto tickers | Crypto agent |
+| price, data, compare, news | Standard flow |
+
+---
+
+## Architecture
+
+### Project Structure
+
+```
+FinSight_App/
+├── app.py                          # Streamlit application entry point
+├── agent/
+│   ├── graph.py                    # LangGraph graph builder, run_query / run_query_async
+│   ├── state.py                    # AgentState TypedDict (shared across all nodes)
+│   └── nodes/
+│       ├── router.py               # Intent detection and flow routing
+│       ├── fetcher.py              # Stock data fetching with fallback chain
+│       ├── crypto.py               # Cryptocurrency data agent
+│       ├── analyst.py              # Single-pass analysis (standard flow)
+│       ├── analysts.py             # Parallel 4-analyst team (trading flow)
+│       ├── researchers.py          # Bull/bear debate, multi-round
+│       ├── trader.py               # Trade decision synthesis
+│       ├── risk_manager.py         # Multi-persona risk assessment
+│       ├── fund_manager.py         # Final allocation decision
+│       └── composer.py             # Response formatting
+├── datasources/
+│   ├── __init__.py                 # DataFetcher unified interface
+│   ├── models.py                   # StockQuote, Fundamentals, OptionsData, NewsItem, CryptoQuote
+│   ├── api_clients.py              # YFinanceClient, FinnhubClient, AlphaVantageClient, CoinGeckoClient
+│   ├── mcp_client.py               # MCP protocol client (JSON-RPC over stdio)
+│   └── mcp_servers/
+│       ├── yfinance_server.py      # Local yfinance MCP server (7 tools, FastMCP)
+│       └── financial_datasets_server.py  # Financial Datasets API MCP server (11 tools)
+├── infrastructure/
+│   ├── memory_manager.py           # Unified memory interface with smart routing
+│   ├── memory_types.py             # QueryIntent, MemoryLayer, TokenBudget, MemoryContext
+│   ├── query_classifier.py         # 2-stage classifier: regex/keywords + LLM fallback
+│   ├── redis_stm.py                # Short-term memory: session history, user snapshot
+│   ├── run_cache.py                # Run-level tool cache (Redis DB 1)
+│   ├── postgres_ltm.py             # Long-term memory: user profiles, trading decisions
+│   └── postgres_summaries.py       # Pre-computed summaries (updated at write-time)
+├── rag/
+│   ├── qdrant_client.py            # HybridQdrant: dense (3072d) + sparse (BM25) + RRF fusion
+│   ├── embeddings.py               # OpenAI text-embedding-3-large, 7-day file cache
+│   └── fusion.py                   # ingest_raw(), retrieve(), rerank_and_summarize()
+└── utils/
+    ├── config.py                   # load_settings() from .env
+    └── cache.py                    # FileTTLCache for embeddings
+```
+
+### Data Fetching — Fallback Chain
+
+```
+Stock:   MCP (yfinance) → yfinance direct → Finnhub → Alpha Vantage
+Crypto:  MCP (yfinance) → yfinance (BTC-USD format) → CoinGecko
+```
+
+Fetch strategies are configurable via `FetchStrategy` enum: `PREFER_MCP` (default), `FIRST_SUCCESS`, `ALL_SOURCES`.
+
+After every successful fetch, data is automatically ingested into Qdrant for semantic retrieval.
+
+### Memory System
+
+```
+Query → 2-Stage Classifier → Route to minimal layers → Race pattern fetch → Token budget
+```
+
+| Layer | Backend | Purpose | Latency |
+|-------|---------|---------|---------|
+| RunCache | Redis DB 1 | Deduplicates A2A tool fetches within a single run | < 10ms |
+| STM | Redis DB 0 | Session history and user snapshot with versioning | < 10ms |
+| LTM | PostgreSQL | User profiles and trading decision history | ~30ms |
+| RAG | Qdrant | Semantic retrieval of historical context | ~50ms |
+
+Token budgets are dynamically allocated per query intent — a `PRICE_ONLY` query gets 600 tokens from RunCache only; a `TRADE_DECISION` query gets 5000 tokens across all layers.
+
+---
+
+## Installation
 
 ### Prerequisites
-- Python 3.9 or higher
-- OpenAI API key
-- Financial data API keys (Finnhub, Alpha Vantage)
 
-### Step 1: Clone Repository
+- Python 3.12 or higher
+- OpenAI API key (required)
+
+### 1. Clone the Repository
+
 ```bash
-git clone <"https://github.com/gen-git-26/FinSight_App">
-cd new_test
+git clone https://github.com/gen-git-26/FinSight_App
+cd FinSight_App
 ```
 
-### Step 2: Create Virtual Environment
+### 2. Create a Virtual Environment
+
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 ```
 
-### Step 3: Install Dependencies
+### 3. Install Dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 4: Install MCP Servers
-```bash
-# Install Yahoo Finance MCP
-cd vendors/yahoo-finance-mcp
-pip install -e .
-cd ../..
+### 4. Install Local MCP Servers
 
-# Install Financial Datasets MCP (if available)
-cd vendors/financial-datasets-mcp
-pip install -e .
-cd ../..
+```bash
+pip install -e datasources/mcp_servers
 ```
 
 ---
 
-## ⚙️ Configuration
-
-### 1. Environment Variables
+## Configuration
 
 Create a `.env` file in the project root:
 
 ```bash
-# OpenAI API (Required)
+# Required
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o  # or gpt-4, gpt-3.5-turbo
+OPENAI_MODEL=gpt-4o-mini
 
-# Financial APIs (Optional - for fallback tools)
-FINNHUB_API_KEY=your_finnhub_key
-ALPHAVANTAGE_API_KEY=your_alphavantage_key
-FINANCIAL_DATASETS_API_KEY=your_key  # If using financial-datasets MCP
+# Memory — Short-term (Redis)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_CACHE_DB=1
 
-# MCP Servers Configuration
-MCP_SERVERS='[
-  {
-    "name": "yfinance",
-    "command": "/path/to/.venv/bin/python",
-    "args": ["-u", "/path/to/vendors/yahoo-finance-mcp/server.py"],
-    "env": {"PYTHONUNBUFFERED": "1"},
-    "cwd": "/path/to/vendors/yahoo-finance-mcp"
-  },
-  {
-    "name": "financial-datasets",
-    "command": "/path/to/.venv/bin/python",
-    "args": ["-u", "/path/to/vendors/financial-datasets-mcp/server.py"],
-    "env": {
-      "PYTHONUNBUFFERED": "1",
-      "FINANCIAL_DATASETS_API_KEY": "your_key"
-    },
-    "cwd": "/path/to/vendors/financial-datasets-mcp"
-  }
-]'
+# Memory — Long-term (PostgreSQL)
+DATABASE_URL=postgresql://user:pass@localhost:5432/finsight
+
+# RAG (Qdrant)
+QDRANT_URL=https://your-cluster.qdrant.io
+QDRANT_API_KEY=...
+QDRANT_COLLECTION=finsight
+
+# Data Sources (optional — extends fallback chain)
+FINNHUB_API_KEY=...
+ALPHAVANTAGE_API_KEY=...
+FINANCIAL_DATASETS_API_KEY=...
 ```
 
-### 2. MCP Server Setup
+Only `OPENAI_API_KEY` is strictly required. Memory layers and additional data sources degrade gracefully when their configuration is absent.
 
-**Important**: Replace `/path/to/` with your actual project path.
+---
 
-#### Option A: Automatic Path Detection
-The system can auto-detect paths if MCP servers are in `vendors/`:
+## Usage
+
+### Run the Application
+
 ```bash
-export MCP_SERVERS='[
-  {
-    "name": "yfinance",
-    "command": "python",
-    "args": ["-u", "vendors/yahoo-finance-mcp/server.py"]
-  }
-]'
+streamlit run app.py --server.port 8502 --server.headless true
 ```
 
-#### Option B: Manual Configuration
-For production, use absolute paths:
+### CLI Mode (bypasses Streamlit)
+
 ```bash
-MCP_SERVERS='[{"name":"yfinance","command":"/home/user/project/.venv/bin/python","args":["-u","/home/user/project/vendors/yahoo-finance-mcp/server.py"]}]'
+python -m agent.graph "Should I buy AAPL?"
+```
+
+### Example Queries
+
+```
+"Tesla stock price"
+"Should I buy NVDA right now?"
+"Compare the quarterly income statements of Amazon and Google"
+"AAPL options expiring 2025-06-20"
+"Bitcoin price"
+"What are the key financial metrics for Meta Platforms?"
+"Bull or bear case for MSFT this quarter?"
 ```
 
 ---
 
-## 🎮 Usage
+## Testing
 
-### Start the Application
 ```bash
-streamlit run app.py
+# Full test suite
+pytest tests/
+
+# Individual test files
+pytest tests/test_api_clients.py
+pytest tests/test_mcp_servers.py
+pytest tests/test_memory_system.py
+
+# Memory system direct run
+python tests/test_memory_system.py
 ```
-
-The app will open in your browser at `http://localhost:8501`
-
-### Using the Interface
-
-1. **Quick Queries**: Use the pre-built example buttons
-   - "Ask me anything..."
-
-2. **Custom Queries**: Type in the chat input at the bottom
-
-3. **Live MCP Inspector**: Expand the "Live MCP" section to see:
-   - Query routing details
-   - Raw API responses
-   - Parsed data structures
-
-4. **View Sources**: Click "Sources" to see data attribution
 
 ---
 
-## 🏗️ Architecture
 
-### Project Structure
-```
-new_test/
-├── app.py                      # Main Streamlit application
-├── agent/
-│   ├── __init__.py
-│   └── agent.py               # Agent configuration & instructions
-├── tools/
-│   ├── __init__.py
-│   ├── query_parser.py        # LLM-based query parsing
-│   ├── mcp_router.py          # Dynamic MCP routing engine
-│   ├── mcp_bridge.py          # Direct MCP access
-│   ├── answer.py              # Response formatting
-│   └── tools.py               # Legacy fallback tools
-├── mcp_connection/
-│   ├── __init__.py
-│   ├── manager.py             # MCP server management
-│   └── startup.py             # MCP lifecycle management
-├── utils/
-│   ├── config.py              # Configuration loader
-│   └── logging.py             # Logging setup
-├── vendors/                    # MCP servers
-│   ├── yahoo-finance-mcp/
-│   └── financial-datasets-mcp/
-├── data/                       # Assets (logo, icons)
-├── .env                        # Environment variables
-└── requirements.txt            # Python dependencies
+## License
 
-
-
-
-
-
-
-
+MIT
