@@ -125,10 +125,15 @@ def _run_analyst(
     analyst_type: str,
     prompt: str,
     data: Dict[str, Any],
-    query: str
+    query: str,
+    rag_context: str = "",
 ) -> AnalystReport:
     """Run a single analyst agent."""
     cfg = load_settings()
+
+    system_content = prompt
+    if rag_context:
+        system_content = prompt + f"\n\n**Historical Context (RAG):**\n{rag_context}"
 
     try:
         response = httpx.post(
@@ -140,7 +145,7 @@ def _run_analyst(
             json={
                 "model": cfg.openai_model,
                 "messages": [
-                    {"role": "system", "content": prompt},
+                    {"role": "system", "content": system_content},
                     {"role": "user", "content": f"Query: {query}\n\nData:\n{json.dumps(data, indent=2, default=str)[:3000]}"}
                 ],
                 "temperature": 0.3,
@@ -178,28 +183,28 @@ def _run_analyst(
         )
 
 
-def fundamental_analyst(data: Dict[str, Any], query: str) -> AnalystReport:
+def fundamental_analyst(data: Dict[str, Any], query: str, rag_context: str = "") -> AnalystReport:
     """Fundamental analysis agent."""
     print(f"[Fundamental Analyst] Analyzing...")
-    return _run_analyst("fundamental", FUNDAMENTAL_ANALYST_PROMPT, data, query)
+    return _run_analyst("fundamental", FUNDAMENTAL_ANALYST_PROMPT, data, query, rag_context)
 
 
-def sentiment_analyst(data: Dict[str, Any], query: str) -> AnalystReport:
+def sentiment_analyst(data: Dict[str, Any], query: str, rag_context: str = "") -> AnalystReport:
     """Sentiment analysis agent."""
     print(f"[Sentiment Analyst] Analyzing...")
-    return _run_analyst("sentiment", SENTIMENT_ANALYST_PROMPT, data, query)
+    return _run_analyst("sentiment", SENTIMENT_ANALYST_PROMPT, data, query, rag_context)
 
 
-def technical_analyst(data: Dict[str, Any], query: str) -> AnalystReport:
+def technical_analyst(data: Dict[str, Any], query: str, rag_context: str = "") -> AnalystReport:
     """Technical analysis agent."""
     print(f"[Technical Analyst] Analyzing...")
-    return _run_analyst("technical", TECHNICAL_ANALYST_PROMPT, data, query)
+    return _run_analyst("technical", TECHNICAL_ANALYST_PROMPT, data, query, rag_context)
 
 
-def news_analyst(data: Dict[str, Any], query: str) -> AnalystReport:
+def news_analyst(data: Dict[str, Any], query: str, rag_context: str = "") -> AnalystReport:
     """News analysis agent."""
     print(f"[News Analyst] Analyzing...")
-    return _run_analyst("news", NEWS_ANALYST_PROMPT, data, query)
+    return _run_analyst("news", NEWS_ANALYST_PROMPT, data, query, rag_context)
 
 
 @track_metrics("analysts_team")
@@ -221,26 +226,36 @@ def analysts_node(state: AgentState) -> Dict[str, Any]:
         if not d.error and d.parsed_data:
             combined_data[d.source] = d.parsed_data
 
+    # Extract RAG context from memory_context if available
+    rag_context = ""
+    memory_context = state.get("memory_context")
+    if memory_context:
+        rag_chunks = getattr(memory_context, "rag_chunks", [])
+        if rag_chunks:
+            rag_context = "\n".join(
+                chunk.get("text", "") for chunk in rag_chunks if chunk.get("text")
+            )
+
     # Run all analysts (in production, these run in parallel)
     reports = []
 
     # Fundamental analysis
-    fundamental_report = fundamental_analyst(combined_data, query)
+    fundamental_report = fundamental_analyst(combined_data, query, rag_context)
     reports.append(fundamental_report)
     print(f"[Fundamental] Recommendation: {fundamental_report.recommendation} ({fundamental_report.confidence:.0%})")
 
     # Sentiment analysis
-    sentiment_report = sentiment_analyst(combined_data, query)
+    sentiment_report = sentiment_analyst(combined_data, query, rag_context)
     reports.append(sentiment_report)
     print(f"[Sentiment] Recommendation: {sentiment_report.recommendation} ({sentiment_report.confidence:.0%})")
 
     # News analysis
-    news_report = news_analyst(combined_data, query)
+    news_report = news_analyst(combined_data, query, rag_context)
     reports.append(news_report)
     print(f"[News] Recommendation: {news_report.recommendation} ({news_report.confidence:.0%})")
 
     # Technical analysis
-    technical_report = technical_analyst(combined_data, query)
+    technical_report = technical_analyst(combined_data, query, rag_context)
     reports.append(technical_report)
     print(f"[Technical] Recommendation: {technical_report.recommendation} ({technical_report.confidence:.0%})")
 
