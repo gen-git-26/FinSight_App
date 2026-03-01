@@ -6,6 +6,7 @@ Tracks token usage, latency, and success/failure for each agent call.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import functools
 from typing import List, Dict, Any, Optional, Callable
@@ -67,41 +68,54 @@ def track_metrics(agent_name: str):
             ...
     """
     def decorator(func: Callable):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.perf_counter()
-            error = None
-            success = True
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                start_time = time.perf_counter()
+                error = None
+                success = True
+                try:
+                    result = await func(*args, **kwargs)
+                    return result
+                except Exception as e:
+                    error = str(e)
+                    success = False
+                    raise
+                finally:
+                    end_time = time.perf_counter()
+                    latency_ms = (end_time - start_time) * 1000
+                    add_metrics(CallMetrics(
+                        agent_name=agent_name,
+                        latency_ms=latency_ms,
+                        success=success,
+                        error=error,
+                    ))
+            return async_wrapper
+        else:
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                start_time = time.perf_counter()
+                error = None
+                success = True
 
-            try:
-                result = func(*args, **kwargs)
-            except Exception as e:
-                error = str(e)
-                success = False
-                raise
-            finally:
-                end_time = time.perf_counter()
-                latency_ms = (end_time - start_time) * 1000
+                try:
+                    result = func(*args, **kwargs)
+                except Exception as e:
+                    error = str(e)
+                    success = False
+                    raise
+                finally:
+                    end_time = time.perf_counter()
+                    latency_ms = (end_time - start_time) * 1000
+                    add_metrics(CallMetrics(
+                        agent_name=agent_name,
+                        latency_ms=latency_ms,
+                        success=success,
+                        error=error,
+                    ))
 
-                # Try to extract token counts from result if available
-                input_tokens = 0
-                output_tokens = 0
-
-                # Token extraction would require modifying LLM calls
-                # For now, estimate based on typical usage
-
-                metrics = CallMetrics(
-                    agent_name=agent_name,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    latency_ms=latency_ms,
-                    success=success,
-                    error=error
-                )
-                add_metrics(metrics)
-
-            return result
-        return wrapper
+                return result
+            return wrapper
     return decorator
 
 

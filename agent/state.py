@@ -91,6 +91,10 @@ class AgentState(TypedDict, total=False):
     response: str
     sources: List[str]
 
+    # Memory integration
+    run_id: str           # UUID scoping RunCache for this query run
+    memory_context: Any   # MemoryContext from MemoryManager.get_context()
+
     # Error handling
     error: Optional[str]
 
