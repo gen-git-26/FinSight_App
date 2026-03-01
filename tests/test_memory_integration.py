@@ -112,7 +112,8 @@ def test_fetcher_node_uses_run_cache():
             mock_result = MagicMock()
             mock_result.success = True
             mock_result.source = "yfinance"
-            mock_result.data = MagicMock(**{"__dict__": {"price": 190.0}})
+            from types import SimpleNamespace
+            mock_result.data = SimpleNamespace(price=190.0)
             mock_result.raw = None
             mock_result.data_type = MagicMock(value="quote")
             mock_result.error = None
