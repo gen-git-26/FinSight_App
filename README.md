@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="ui/logo.png" alt="FinSight Logo" width="200"/>
+</div>
+
 # FinSight
 
 **Multi-Agent Financial Analysis System**
