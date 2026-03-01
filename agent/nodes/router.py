@@ -11,12 +11,13 @@ Supports A2A (Agent-to-Agent) architecture:
 from __future__ import annotations
 
 import json
+import uuid
 import httpx
 from typing import Dict, Any
 
 from agent.state import AgentState, ParsedQuery
 from utils.config import load_settings
-from infrastructure.redis_stm import get_stm
+from infrastructure.memory_manager import get_memory_manager
 from evaluation.metrics import track_metrics
 
 
@@ -128,7 +129,7 @@ Examples:
 
 
 @track_metrics("router")
-def router_node(state: AgentState) -> Dict[str, Any]:
+async def router_node(state: AgentState) -> Dict[str, Any]:
     """
     Router node - analyzes the query and decides routing.
 
@@ -142,17 +143,23 @@ def router_node(state: AgentState) -> Dict[str, Any]:
 
     cfg = load_settings()
 
-    # Get memory context from Redis STM
-    stm = get_stm()
+    # Generate run_id to scope RunCache for this entire query run
+    run_id = str(uuid.uuid4())
+
+    # Get enriched memory context via MemoryManager (degrades gracefully if Redis/Qdrant absent)
+    manager = get_memory_manager()
+    context = None
+    memory_context_str = ""
     try:
-        session_history = stm.get_history(user_id, limit=5)
-        memory_context = "\n".join([
-            f"{m['role']}: {m['content'][:100]}"
-            for m in session_history
-        ]) if session_history else ""
+        context = await manager.get_context(
+            query=query,
+            session_id=user_id,
+            user_id=user_id,
+            run_id=run_id,
+        )
+        memory_context_str = context.to_prompt_context()
     except Exception as e:
         print(f"[Router] Memory fetch failed: {e}")
-        memory_context = ""
 
     # Call LLM for routing decision
     try:
@@ -166,7 +173,7 @@ def router_node(state: AgentState) -> Dict[str, Any]:
                 "model": cfg.openai_model,
                 "messages": [
                     {"role": "system", "content": ROUTER_PROMPT},
-                    {"role": "user", "content": f"Query: {query}\n\nMemory context: {memory_context[:500] if memory_context else 'None'}"}
+                    {"role": "user", "content": f"Query: {query}\n\nMemory context: {memory_context_str[:500] if memory_context_str else 'None'}"}
                 ],
                 "temperature": 0.0,
                 "max_tokens": 200
@@ -210,10 +217,11 @@ def router_node(state: AgentState) -> Dict[str, Any]:
             "parsed_query": parsed_query,
             "next_agent": next_agent,
             "is_trading_query": is_trading_query,
+            "run_id": run_id,
+            "memory_context": context,
             "memory": {
                 "user_id": user_id,
-                "session_history": session_history if 'session_history' in dir() else [],
-                "retrieved_memory": memory_context
+                "retrieved_memory": memory_context_str,
             }
         }
 
@@ -248,5 +256,7 @@ def router_node(state: AgentState) -> Dict[str, Any]:
             ),
             "next_agent": next_agent,
             "is_trading_query": is_trading,
+            "run_id": run_id,
+            "memory_context": context,
             "error": str(e)
         }
