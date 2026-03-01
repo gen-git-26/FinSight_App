@@ -1,0 +1,10 @@
+# docker-compose.yml
+services:
+  finsight:
+    build: .
+    ports:
+      - "8000:8000"
+      - "8502:8502"
+    env_file:
+      - .env
+    restart: unless-stopped
