@@ -314,9 +314,14 @@ class PostgresLTM:
         research_report: Optional[Dict] = None,
         risk_assessment: Optional[Dict] = None,
         fund_manager_decision: Optional[Dict] = None,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        validity_class: str = "trading_decision",
+        as_of: Optional[int] = None,
+        source: Optional[str] = None,
     ) -> bool:
         """Save a trading decision to history."""
+        as_of_ts = datetime.fromtimestamp(as_of) if as_of else datetime.utcnow()
+
         with self.get_connection() as conn:
             if conn is None:
                 return False
@@ -325,15 +330,17 @@ class PostgresLTM:
                 cur.execute("""
                     INSERT INTO trading_decisions
                     (user_id, session_id, ticker, query, decision,
-                     analyst_reports, research_report, risk_assessment, fund_manager_decision)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     analyst_reports, research_report, risk_assessment,
+                     fund_manager_decision, validity_class, as_of, source)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     user_id, session_id, ticker, query,
                     Json(decision),
                     Json(analyst_reports) if analyst_reports else None,
                     Json(research_report) if research_report else None,
                     Json(risk_assessment) if risk_assessment else None,
-                    Json(fund_manager_decision) if fund_manager_decision else None
+                    Json(fund_manager_decision) if fund_manager_decision else None,
+                    validity_class, as_of_ts, source
                 ))
                 return True
 
@@ -374,9 +381,14 @@ class PostgresLTM:
         role: str,
         content: str,
         session_id: Optional[str] = None,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        validity_class: str = "session_memory",
+        as_of: Optional[int] = None,
+        source: Optional[str] = None,
     ) -> bool:
         """Save a conversation message."""
+        as_of_ts = datetime.fromtimestamp(as_of) if as_of else datetime.utcnow()
+
         with self.get_connection() as conn:
             if conn is None:
                 return False
@@ -384,9 +396,13 @@ class PostgresLTM:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO conversation_memory
-                    (user_id, session_id, role, content, metadata)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (user_id, session_id, role, content, Json(metadata or {})))
+                    (user_id, session_id, role, content, metadata,
+                     validity_class, as_of, source)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    user_id, session_id, role, content, Json(metadata or {}),
+                    validity_class, as_of_ts, source
+                ))
                 return True
 
     def get_conversation_history(

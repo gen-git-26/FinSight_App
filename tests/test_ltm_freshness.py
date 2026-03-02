@@ -88,3 +88,68 @@ def test_summary_sql_contains_validity_columns():
     assert "validity_class" in SUMMARY_TABLES_SQL
     assert "valid_for_context_until" in SUMMARY_TABLES_SQL
     assert "as_of" in SUMMARY_TABLES_SQL
+
+
+# === Task 5: LTM write paths ===
+
+def test_save_trading_decision_includes_validity_fields():
+    """save_trading_decision SQL must include validity columns."""
+    from unittest.mock import MagicMock, patch
+    from infrastructure.postgres_ltm import PostgresLTM
+
+    ltm = PostgresLTM()
+    executed_sql = []
+
+    mock_cursor = MagicMock()
+    mock_cursor.__enter__ = lambda s: s
+    mock_cursor.__exit__ = MagicMock(return_value=False)
+    mock_cursor.execute = lambda sql, params: executed_sql.append(sql)
+
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = lambda s: s
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+
+    with patch.object(ltm, 'get_connection', return_value=mock_conn):
+        ltm.save_trading_decision(
+            user_id="u1", ticker="AAPL", query="buy?",
+            decision={"action": "BUY", "horizon": "swing"},
+            validity_class="trading_decision",
+            as_of=1740960000,
+            source="fund_manager_node"
+        )
+
+    assert executed_sql, "No SQL was executed"
+    assert "validity_class" in executed_sql[0]
+    assert "as_of" in executed_sql[0]
+    assert "source" in executed_sql[0]
+
+def test_save_message_includes_validity_fields():
+    """save_message SQL must include validity columns."""
+    from unittest.mock import MagicMock, patch
+    from infrastructure.postgres_ltm import PostgresLTM
+
+    ltm = PostgresLTM()
+    executed_sql = []
+
+    mock_cursor = MagicMock()
+    mock_cursor.__enter__ = lambda s: s
+    mock_cursor.__exit__ = MagicMock(return_value=False)
+    mock_cursor.execute = lambda sql, params: executed_sql.append(sql)
+
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = lambda s: s
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+
+    with patch.object(ltm, 'get_connection', return_value=mock_conn):
+        ltm.save_message(
+            user_id="u1", role="user", content="hello",
+            validity_class="session_memory",
+            as_of=1740960000,
+            source="composer_node"
+        )
+
+    assert executed_sql, "No SQL was executed"
+    assert "validity_class" in executed_sql[0]
+    assert "as_of" in executed_sql[0]
