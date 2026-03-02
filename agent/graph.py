@@ -86,6 +86,17 @@ from typing import Literal
 from langgraph.graph import StateGraph, END
 
 from agent.state import AgentState
+def _init_db() -> None:
+    """Initialize Postgres on first graph compilation (idempotent, degrades gracefully)."""
+    try:
+        from infrastructure.postgres_summaries import get_summaries
+        get_summaries()
+    except Exception as e:
+        print(f"[Graph] Postgres init skipped: {e}")
+
+_init_db()
+
+
 from agent.nodes import (
     # Standard flow
     router_node,

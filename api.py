@@ -11,13 +11,25 @@ from __future__ import annotations
 import dotenv
 dotenv.load_dotenv()
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from agent.graph import get_graph
 
 
-app = FastAPI(title="FinSight API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        from infrastructure.postgres_summaries import get_summaries
+        get_summaries()
+        print("[Startup] Postgres initialized")
+    except Exception as e:
+        print(f"[Startup] Postgres not available: {e}")
+    yield
+
+
+app = FastAPI(title="FinSight API", version="1.0.0", lifespan=lifespan)
 
 
 class QueryRequest(BaseModel):
