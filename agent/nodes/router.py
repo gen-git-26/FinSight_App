@@ -18,6 +18,7 @@ from typing import Dict, Any
 from agent.state import AgentState, ParsedQuery
 from utils.config import load_settings
 from infrastructure.memory_manager import get_memory_manager
+from infrastructure.memory_policy import get_policy
 from evaluation.metrics import track_metrics
 
 
@@ -161,6 +162,11 @@ async def router_node(state: AgentState) -> Dict[str, Any]:
     except Exception as e:
         print(f"[Router] Memory fetch failed: {e}")
 
+    # Derive MemoryPolicy from classifier output
+    memory_policy = None
+    if context and context.classification:
+        memory_policy = get_policy(context.classification.intent)
+
     # Call LLM for routing decision
     try:
         response = httpx.post(
@@ -219,6 +225,7 @@ async def router_node(state: AgentState) -> Dict[str, Any]:
             "is_trading_query": is_trading_query,
             "run_id": run_id,
             "memory_context": context,
+            "memory_policy": memory_policy,
             "memory": {
                 "user_id": user_id,
                 "retrieved_memory": memory_context_str,
@@ -258,5 +265,6 @@ async def router_node(state: AgentState) -> Dict[str, Any]:
             "is_trading_query": is_trading,
             "run_id": run_id,
             "memory_context": context,
+            "memory_policy": memory_policy,
             "error": str(e)
         }

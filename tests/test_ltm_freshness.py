@@ -287,3 +287,45 @@ def test_memory_policy_explain_last_decision_no_live_tools():
     policy = get_policy(QueryIntent.USER_HISTORY)
     assert policy.require_live_tools is False
     assert "trading_decision" in policy.allowed_classes
+
+
+# === Task 9: router emits memory_policy ===
+
+def test_agent_state_accepts_memory_policy_field():
+    from agent.state import AgentState
+    state: AgentState = {
+        "query": "test",
+        "memory_policy": None,
+    }
+    assert state.get("memory_policy") is None
+
+def test_router_emits_memory_policy():
+    import asyncio
+    from unittest.mock import patch, AsyncMock, MagicMock
+    from infrastructure.memory_types import MemoryContext, ClassificationResult, QueryIntent, MemoryLayer
+
+    fake_classification = ClassificationResult(
+        intent=QueryIntent.PRICE_ONLY,
+        confidence=0.95,
+        tickers=["AAPL"],
+        layers_needed=[MemoryLayer.RUN_CACHE]
+    )
+    fake_context = MemoryContext()
+    fake_context.classification = fake_classification
+
+    mock_manager = MagicMock()
+    mock_manager.get_context = AsyncMock(return_value=fake_context)
+
+    with patch("agent.nodes.router.get_memory_manager", return_value=mock_manager), \
+         patch("agent.nodes.router.httpx.post") as mock_post:
+        mock_post.return_value.json.return_value = {
+            "choices": [{"message": {"content": '{"ticker":"AAPL","additional_tickers":[],"intent":"price","query_type":"stock","next_agent":"fetcher","is_trading_query":false}'}}]
+        }
+        mock_post.return_value.raise_for_status = MagicMock()
+
+        from agent.nodes.router import router_node
+        result = asyncio.run(router_node({"query": "AAPL price?", "user_id": "u1"}))
+
+    assert "memory_policy" in result
+    assert result["memory_policy"] is not None
+    assert result["memory_policy"].require_live_tools is True
