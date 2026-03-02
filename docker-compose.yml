@@ -16,6 +16,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 15s
 
   finsight:
     build: .
@@ -24,6 +25,8 @@ services:
       - "8502:8502"
     env_file:
       - .env
+    environment:
+      POSTGRES_HOST: postgres   # override .env for Docker Compose networking
     depends_on:
       postgres:
         condition: service_healthy
