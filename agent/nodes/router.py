@@ -19,7 +19,22 @@ from agent.state import AgentState, ParsedQuery
 from utils.config import load_settings
 from infrastructure.memory_manager import get_memory_manager
 from infrastructure.memory_policy import get_policy
+from infrastructure.memory_types import QueryIntent
 from evaluation.metrics import track_metrics
+
+# Map classifier intent → routing (next_agent, query_type, is_trading_query)
+_INTENT_TO_AGENT: dict = {
+    QueryIntent.PRICE_ONLY:       ("fetcher",  "stock",   False),
+    QueryIntent.TICKER_INFO:      ("fetcher",  "stock",   False),
+    QueryIntent.NEWS_SUMMARY:     ("fetcher",  "news",    False),
+    QueryIntent.TRADE_DECISION:   ("trading",  "trading", True),
+    QueryIntent.USER_HISTORY:     ("composer", "general", False),
+    QueryIntent.USER_PREFERENCES: ("composer", "general", False),
+    QueryIntent.SEMANTIC_SEARCH:  ("fetcher",  "general", False),
+    QueryIntent.CONVERSATION:     ("composer", "general", False),
+}
+
+_CLASSIFIER_CONFIDENCE_THRESHOLD = 0.85
 
 
 # Trading-related keywords for A2A routing
@@ -166,6 +181,43 @@ async def router_node(state: AgentState) -> Dict[str, Any]:
     memory_policy = None
     if context and context.classification:
         memory_policy = get_policy(context.classification.intent)
+
+    # Fast path: use classifier result if high confidence (skips redundant LLM call)
+    if (
+        context
+        and context.classification
+        and context.classification.confidence >= _CLASSIFIER_CONFIDENCE_THRESHOLD
+        and context.classification.intent in _INTENT_TO_AGENT
+    ):
+        intent = context.classification.intent
+        next_agent, query_type, is_trading_query = _INTENT_TO_AGENT[intent]
+        tickers = context.classification.tickers
+        ticker = tickers[0] if tickers else None
+
+        # Crypto override: if ticker looks like crypto, route to crypto agent
+        crypto_tickers = {"BTC-USD", "ETH-USD", "BTC", "ETH", "SOL", "DOGE", "XRP"}
+        if any(t in crypto_tickers for t in (tickers or [])):
+            next_agent = "crypto"
+            query_type = "crypto"
+            is_trading_query = False
+
+        fast_parsed_query = ParsedQuery(
+            ticker=ticker,
+            additional_tickers=tickers[1:] if tickers else [],
+            intent=intent.value,
+            query_type=query_type,
+            raw_query=query
+        )
+        print(f"[Router] Classifier fast-path → {next_agent} (confidence: {context.classification.confidence:.2f})")
+        return {
+            "parsed_query": fast_parsed_query,
+            "next_agent": next_agent,
+            "is_trading_query": is_trading_query,
+            "run_id": run_id,
+            "memory_context": context,
+            "memory_policy": memory_policy,
+            "memory": {"user_id": user_id, "retrieved_memory": memory_context_str},
+        }
 
     # Call LLM for routing decision
     try:

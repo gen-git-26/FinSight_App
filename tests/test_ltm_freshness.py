@@ -369,3 +369,39 @@ def test_to_prompt_context_stamps_trading_decisions():
     }]
     result = ctx.to_prompt_context()
     assert "as_of" in result or "trading_decision" in result
+
+
+# === Task 12: QueryClassifier fast-path in router ===
+
+def test_router_skips_llm_when_classifier_is_high_confidence():
+    """If classifier confidence >= 0.85, router must NOT call the LLM."""
+    import asyncio
+    from unittest.mock import patch, AsyncMock, MagicMock
+    from infrastructure.memory_types import (
+        MemoryContext, ClassificationResult, QueryIntent, MemoryLayer
+    )
+
+    fake_classification = ClassificationResult(
+        intent=QueryIntent.TRADE_DECISION,
+        confidence=0.92,
+        tickers=["TSLA"],
+        layers_needed=[MemoryLayer.LTM, MemoryLayer.RAG]
+    )
+    fake_context = MemoryContext()
+    fake_context.classification = fake_classification
+
+    mock_manager = MagicMock()
+    mock_manager.get_context = AsyncMock(return_value=fake_context)
+
+    with patch("agent.nodes.router.get_memory_manager", return_value=mock_manager), \
+         patch("agent.nodes.router.httpx.post") as mock_llm:
+
+        from agent.nodes import router as router_module
+        import importlib
+        importlib.reload(router_module)
+
+        result = asyncio.run(router_module.router_node({"query": "Should I buy Tesla?", "user_id": "u1"}))
+
+    mock_llm.assert_not_called()
+    assert result["is_trading_query"] is True
+    assert result["next_agent"] == "trading"
