@@ -79,3 +79,12 @@ def test_init_sql_contains_compound_index():
 def test_init_sql_contains_unique_constraint_user_patterns():
     from infrastructure.postgres_ltm import INIT_SQL
     assert "UNIQUE (user_id, pattern_type)" in INIT_SQL
+
+
+# === Task 4: Summary tables ===
+
+def test_summary_sql_contains_validity_columns():
+    from infrastructure.postgres_summaries import SUMMARY_TABLES_SQL
+    assert "validity_class" in SUMMARY_TABLES_SQL
+    assert "valid_for_context_until" in SUMMARY_TABLES_SQL
+    assert "as_of" in SUMMARY_TABLES_SQL

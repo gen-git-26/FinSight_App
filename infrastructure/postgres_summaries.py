@@ -45,7 +45,10 @@ CREATE TABLE IF NOT EXISTS user_profile_summary (
     total_tickers_analyzed INT DEFAULT 0,
     last_active TIMESTAMP,
     version INT DEFAULT 1,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    as_of TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    validity_class VARCHAR(50) DEFAULT 'user_preference',
+    valid_for_context_until TIMESTAMP
 );
 
 -- Per ticker summary for each user
@@ -59,6 +62,9 @@ CREATE TABLE IF NOT EXISTS user_ticker_summary (
     avg_sentiment FLOAT,
     notes TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    as_of TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    validity_class VARCHAR(50) DEFAULT 'trading_decision',
+    valid_for_context_until TIMESTAMP,
     PRIMARY KEY (user_id, ticker)
 );
 
