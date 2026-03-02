@@ -137,14 +137,39 @@ def _chunk_text(raw: str, *, max_len: int = MAX_SNIPPET_CHARS) -> List[str]:
     return chunks[:DEFAULT_K]
 
 
-async def ingest_raw(*, tool: str, raw: Any, symbol: str = "", doc_type: str = "", date: str = "") -> List[str]:
+async def ingest_raw(
+    *,
+    tool: str,
+    raw: Any,
+    symbol: str = "",
+    doc_type: str = "",
+    date: str = "",
+    as_of: Optional[int] = None,
+) -> List[str]:
     """Ingest raw API output as small, queryable snippets and return generated IDs."""
+    import time as _time
+    from infrastructure.validity import ValidityClass, compute_valid_until
+
     qdr = HybridQdrant()
     qdr.ensure_collections()
     text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
     chunks = _chunk_text(text)
     items = []
     ids = []
+
+    # Map doc_type to ValidityClass (default: news_sentiment for unknown types)
+    _DOC_TYPE_TO_VALIDITY = {
+        "price_snapshot":   ValidityClass.PRICE_SNAPSHOT,
+        "end_of_day_price": ValidityClass.END_OF_DAY_PRICE,
+        "breaking_news":    ValidityClass.BREAKING_NEWS,
+        "news_sentiment":   ValidityClass.NEWS_SENTIMENT,
+        "fundamental_data": ValidityClass.FUNDAMENTAL_DATA,
+        "session_memory":   ValidityClass.SESSION_MEMORY,
+    }
+    validity_class = _DOC_TYPE_TO_VALIDITY.get(doc_type, ValidityClass.NEWS_SENTIMENT)
+    as_of_epoch = as_of or int(_time.time())
+    valid_until = compute_valid_until(validity_class, as_of_epoch)
+
     for i, ch in enumerate(chunks):
         pid = f"{tool}-{symbol or 'NA'}-{i}"
         ids.append(pid)
@@ -155,6 +180,9 @@ async def ingest_raw(*, tool: str, raw: Any, symbol: str = "", doc_type: str = "
             "type": doc_type,
             "date": date,
             "source": tool,
+            "validity_class": validity_class.value,
+            "as_of": as_of_epoch,
+            "valid_until": valid_until,
         })
     if items:
         await qdr.upsert_snippets(items)

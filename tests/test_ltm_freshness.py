@@ -206,3 +206,42 @@ def test_get_conversation_history_filters_expired_rows():
 
     assert executed_sql, "No SQL was executed"
     assert "valid_for_context_until" in executed_sql[0]
+
+
+# === Task 7: Qdrant ingest validity payload ===
+
+def test_ingest_raw_payload_contains_valid_until_as_epoch():
+    """ingest_raw must add valid_until (epoch int) and as_of to payload."""
+    import asyncio
+    from unittest.mock import MagicMock, AsyncMock, patch
+
+    captured_items = []
+
+    async def fake_upsert(items):
+        captured_items.extend(items)
+
+    mock_qdr = MagicMock()
+    mock_qdr.ensure_collections = MagicMock()
+    mock_qdr.upsert_snippets = fake_upsert
+
+    with patch("rag.fusion.HybridQdrant", return_value=mock_qdr), \
+         patch("rag.fusion.embed_texts", new=AsyncMock(return_value=[[0.1] * 10])):
+        from rag import fusion
+
+        asyncio.run(fusion.ingest_raw(
+            tool="yfinance",
+            raw="AAPL price is 180",
+            symbol="AAPL",
+            doc_type="price_snapshot",
+            as_of=1740960000,
+        ))
+
+    assert captured_items, "No items were upserted"
+    item = captured_items[0]
+    assert "valid_until" in item, "valid_until missing from payload"
+    assert isinstance(item["valid_until"], int), "valid_until must be epoch int"
+    assert "as_of" in item
+    assert item["as_of"] == 1740960000
+    assert item["validity_class"] == "price_snapshot"
+    # price_snapshot window = 3600s
+    assert item["valid_until"] == 1740960000 + 3600

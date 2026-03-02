@@ -289,6 +289,15 @@ class MemoryManager:
                     )
                 )
 
+            # Filter out expired chunks
+            import time as _time
+            must_conditions.append(
+                rest.FieldCondition(
+                    key="valid_until",
+                    range=rest.Range(gte=int(_time.time()))
+                )
+            )
+
             # Limit search based on intent
             limit = 5 if budget.rag_results < 1500 else 8
 
