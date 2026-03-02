@@ -128,7 +128,19 @@ class MemoryContext:
             parts.append(f"User Preferences: {self.user_preferences}")
 
         if self.ticker_history:
-            parts.append(f"Recent decisions: {len(self.ticker_history)} records")
+            stamped = []
+            for rec in self.ticker_history:
+                as_of = rec.get("as_of")
+                vc = rec.get("validity_class", "trading_decision")
+                content = (
+                    f"{rec.get('ticker', '?')}: last decision {rec.get('last_decision', '?')}"
+                    f" on {rec.get('last_analysis_date', '?')}"
+                )
+                if isinstance(as_of, (int, float)):
+                    stamped.append(stamp_memory_fact(vc, int(as_of), content, context_only=True))
+                else:
+                    stamped.append(content)
+            parts.append("Prior decisions:\n" + "\n".join(stamped))
 
         if self.conversation_history:
             history_str = "\n".join([
@@ -144,6 +156,28 @@ class MemoryContext:
             parts.append(f"Relevant context:\n{chunks_str}")
 
         return "\n\n".join(parts)
+
+
+def stamp_memory_fact(
+    validity_class: str,
+    as_of_epoch: int,
+    content: str,
+    context_only: bool = True,
+) -> str:
+    """
+    Format a memory-sourced fact with freshness label for LLM prompt injection.
+
+    Format: "[class] (as_of: YYYY-MM-DD, age: Nd): <content>"
+    """
+    from datetime import timezone
+    as_of_dt = datetime.fromtimestamp(as_of_epoch, tz=timezone.utc)
+    age_days = (datetime.now(tz=timezone.utc) - as_of_dt).days
+    as_of_str = as_of_dt.strftime("%Y-%m-%d")
+
+    stamp = f"{validity_class} (as_of: {as_of_str}, age: {age_days}d): {content}"
+    if context_only:
+        stamp += "\nContext only — verify with live data before treating as current."
+    return stamp
 
 
 @dataclass

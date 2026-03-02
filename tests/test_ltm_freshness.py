@@ -329,3 +329,43 @@ def test_router_emits_memory_policy():
     assert "memory_policy" in result
     assert result["memory_policy"] is not None
     assert result["memory_policy"].require_live_tools is True
+
+
+# === Task 10: Prompt stamping ===
+
+def test_stamp_memory_fact_includes_as_of_and_age():
+    from infrastructure.memory_types import stamp_memory_fact
+    result = stamp_memory_fact(
+        validity_class="trading_decision",
+        as_of_epoch=1740960000,
+        content="BUY AAPL — fund manager approved",
+        context_only=True
+    )
+    assert "as_of:" in result
+    assert "trading_decision" in result
+    assert "Context only" in result
+    assert "BUY AAPL" in result
+
+def test_stamp_memory_fact_user_preference_no_context_only_label():
+    from infrastructure.memory_types import stamp_memory_fact
+    result = stamp_memory_fact(
+        validity_class="user_preference",
+        as_of_epoch=1740960000,
+        content="Risk tolerance = moderate",
+        context_only=False
+    )
+    assert "user_preference" in result
+    assert "Context only" not in result
+
+def test_to_prompt_context_stamps_trading_decisions():
+    from infrastructure.memory_types import MemoryContext
+    ctx = MemoryContext()
+    ctx.ticker_history = [{
+        "last_decision": "BUY",
+        "ticker": "AAPL",
+        "last_analysis_date": "2026-02-12T00:00:00",
+        "validity_class": "trading_decision",
+        "as_of": 1739318400,
+    }]
+    result = ctx.to_prompt_context()
+    assert "as_of" in result or "trading_decision" in result
