@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Trading decisions history
+-- Trading decisions history (permanent audit log — never deleted)
 CREATE TABLE IF NOT EXISTS trading_decisions (
     id SERIAL PRIMARY KEY,
     user_id VARCHAR(255) NOT NULL,
@@ -77,7 +77,13 @@ CREATE TABLE IF NOT EXISTS trading_decisions (
     research_report JSONB,
     risk_assessment JSONB,
     fund_manager_decision JSONB,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    validity_class VARCHAR(50) DEFAULT 'trading_decision',
+    valid_for_context_until TIMESTAMP,
+    as_of TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    source VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_valid_after_as_of_td
+        CHECK (valid_for_context_until IS NULL OR valid_for_context_until >= as_of)
 );
 
 -- Conversation memory
@@ -88,7 +94,13 @@ CREATE TABLE IF NOT EXISTS conversation_memory (
     role VARCHAR(50) NOT NULL,
     content TEXT NOT NULL,
     metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    validity_class VARCHAR(50) DEFAULT 'session_memory',
+    valid_for_context_until TIMESTAMP,
+    as_of TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    source VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_valid_after_as_of_cm
+        CHECK (valid_for_context_until IS NULL OR valid_for_context_until >= as_of)
 );
 
 -- User preferences / learned patterns
@@ -98,15 +110,83 @@ CREATE TABLE IF NOT EXISTS user_patterns (
     pattern_type VARCHAR(100) NOT NULL,
     pattern_data JSONB NOT NULL,
     confidence FLOAT DEFAULT 0.5,
+    validity_class VARCHAR(50) DEFAULT 'behavioral_pattern',
+    valid_for_context_until TIMESTAMP,
+    as_of TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    source VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, pattern_type),
+    CONSTRAINT chk_valid_after_as_of_up
+        CHECK (valid_for_context_until IS NULL OR valid_for_context_until >= as_of)
 );
+
+-- Validity window trigger function
+CREATE OR REPLACE FUNCTION set_validity_window()
+RETURNS TRIGGER AS $$
+DECLARE
+    horizon TEXT;
+BEGIN
+    -- Respect explicit value if caller set it
+    IF NEW.valid_for_context_until IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+
+    -- trading_decision: check horizon from decision JSONB
+    IF NEW.validity_class = 'trading_decision' THEN
+        horizon := NEW.decision->>'horizon';
+        NEW.valid_for_context_until := NEW.as_of + (
+            CASE horizon
+                WHEN 'day'       THEN INTERVAL '7 days'
+                WHEN 'long_term' THEN INTERVAL '180 days'
+                ELSE                  INTERVAL '30 days'
+            END
+        );
+        RETURN NEW;
+    END IF;
+
+    NEW.valid_for_context_until := CASE NEW.validity_class
+        WHEN 'price_snapshot'     THEN NEW.as_of + INTERVAL '1 hour'
+        WHEN 'end_of_day_price'   THEN NEW.as_of + INTERVAL '48 hours'
+        WHEN 'breaking_news'      THEN NEW.as_of + INTERVAL '72 hours'
+        WHEN 'news_sentiment'     THEN NEW.as_of + INTERVAL '7 days'
+        WHEN 'session_memory'     THEN NEW.as_of + INTERVAL '3 days'
+        WHEN 'session_summary'    THEN NEW.as_of + INTERVAL '30 days'
+        WHEN 'fundamental_data'   THEN NEW.as_of + INTERVAL '90 days'
+        WHEN 'behavioral_pattern' THEN NEW.as_of + INTERVAL '180 days'
+        WHEN 'user_preference'    THEN NULL
+        ELSE                           NEW.as_of + INTERVAL '30 days'
+    END;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_td_validity
+    BEFORE INSERT ON trading_decisions
+    FOR EACH ROW EXECUTE FUNCTION set_validity_window();
+
+CREATE OR REPLACE TRIGGER trg_cm_validity
+    BEFORE INSERT ON conversation_memory
+    FOR EACH ROW EXECUTE FUNCTION set_validity_window();
+
+CREATE OR REPLACE TRIGGER trg_up_validity
+    BEFORE INSERT ON user_patterns
+    FOR EACH ROW EXECUTE FUNCTION set_validity_window();
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_trading_decisions_user ON trading_decisions(user_id);
 CREATE INDEX IF NOT EXISTS idx_trading_decisions_ticker ON trading_decisions(ticker);
 CREATE INDEX IF NOT EXISTS idx_conversation_memory_user ON conversation_memory(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_patterns_user ON user_patterns(user_id);
+
+-- Compound indexes for validity-filtered retrieval
+CREATE INDEX IF NOT EXISTS idx_td_user_class_valid
+    ON trading_decisions (user_id, validity_class, valid_for_context_until DESC);
+CREATE INDEX IF NOT EXISTS idx_cm_user_session_valid
+    ON conversation_memory (user_id, session_id, valid_for_context_until DESC);
+CREATE INDEX IF NOT EXISTS idx_up_user_class_valid
+    ON user_patterns (user_id, validity_class, valid_for_context_until DESC);
 """
 
 

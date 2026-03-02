@@ -51,3 +51,31 @@ def test_horizon_window_seconds_long_term():
 def test_horizon_window_seconds_unknown_defaults_to_swing():
     from infrastructure.validity import horizon_window_seconds
     assert horizon_window_seconds("unknown_value") == 30 * 86400
+
+
+# === Task 3: INIT_SQL schema migration ===
+
+def test_init_sql_contains_validity_columns():
+    from infrastructure.postgres_ltm import INIT_SQL
+    assert "validity_class" in INIT_SQL
+    assert "valid_for_context_until" in INIT_SQL
+    assert "as_of" in INIT_SQL
+    assert "source" in INIT_SQL
+
+def test_init_sql_contains_trigger():
+    from infrastructure.postgres_ltm import INIT_SQL
+    assert "set_validity_window" in INIT_SQL
+    assert "BEFORE INSERT" in INIT_SQL
+
+def test_init_sql_contains_check_constraint():
+    from infrastructure.postgres_ltm import INIT_SQL
+    assert "chk_valid_after_as_of" in INIT_SQL
+
+def test_init_sql_contains_compound_index():
+    from infrastructure.postgres_ltm import INIT_SQL
+    assert "idx_td_user_class_valid" in INIT_SQL
+    assert "idx_cm_user_session_valid" in INIT_SQL
+
+def test_init_sql_contains_unique_constraint_user_patterns():
+    from infrastructure.postgres_ltm import INIT_SQL
+    assert "UNIQUE (user_id, pattern_type)" in INIT_SQL
