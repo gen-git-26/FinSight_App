@@ -15,9 +15,21 @@ from qdrant_client.http import models as rest
 from rag.embeddings import embed_texts, sparse_from_text
 from rag.qdrant_client import HybridQdrant
 from utils.config import load_settings
+from infrastructure.validity import ValidityClass, compute_valid_until
 
 
 logger = logging.getLogger(__name__)
+
+# Map doc_type strings to ValidityClass values.
+# Defined at module level to avoid re-creating the dict on every ingest_raw call.
+_DOC_TYPE_TO_VALIDITY: dict = {
+    "price_snapshot":   ValidityClass.PRICE_SNAPSHOT,
+    "end_of_day_price": ValidityClass.END_OF_DAY_PRICE,
+    "breaking_news":    ValidityClass.BREAKING_NEWS,
+    "news_sentiment":   ValidityClass.NEWS_SENTIMENT,
+    "fundamental_data": ValidityClass.FUNDAMENTAL_DATA,
+    "session_memory":   ValidityClass.SESSION_MEMORY,
+}
 
 DEFAULT_K = 12
 MAX_SNIPPET_CHARS = 600
@@ -148,7 +160,6 @@ async def ingest_raw(
 ) -> List[str]:
     """Ingest raw API output as small, queryable snippets and return generated IDs."""
     import time as _time
-    from infrastructure.validity import ValidityClass, compute_valid_until
 
     qdr = HybridQdrant()
     qdr.ensure_collections()
@@ -158,14 +169,6 @@ async def ingest_raw(
     ids = []
 
     # Map doc_type to ValidityClass (default: news_sentiment for unknown types)
-    _DOC_TYPE_TO_VALIDITY = {
-        "price_snapshot":   ValidityClass.PRICE_SNAPSHOT,
-        "end_of_day_price": ValidityClass.END_OF_DAY_PRICE,
-        "breaking_news":    ValidityClass.BREAKING_NEWS,
-        "news_sentiment":   ValidityClass.NEWS_SENTIMENT,
-        "fundamental_data": ValidityClass.FUNDAMENTAL_DATA,
-        "session_memory":   ValidityClass.SESSION_MEMORY,
-    }
     validity_class = _DOC_TYPE_TO_VALIDITY.get(doc_type, ValidityClass.NEWS_SENTIMENT)
     as_of_epoch = as_of or int(_time.time())
     valid_until = compute_valid_until(validity_class, as_of_epoch)

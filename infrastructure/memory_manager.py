@@ -279,6 +279,7 @@ class MemoryManager:
 
             # Build filters based on classification
             must_conditions = []
+            should_conditions = []
 
             # Filter by ticker if available
             if classification.tickers:
@@ -289,9 +290,10 @@ class MemoryManager:
                     )
                 )
 
-            # Filter out expired chunks
+            # Bias toward fresh chunks but do NOT hard-exclude legacy documents
+            # that pre-date the validity payload feature (they have no valid_until set).
             import time as _time
-            must_conditions.append(
+            should_conditions.append(
                 rest.FieldCondition(
                     key="valid_until",
                     range=rest.Range(gte=int(_time.time()))
@@ -306,7 +308,8 @@ class MemoryManager:
                 dense=dense,
                 sparse=sparse,
                 limit=limit,
-                must=must_conditions if must_conditions else None
+                must=must_conditions if must_conditions else None,
+                should=should_conditions if should_conditions else None,
             )
 
             # Extract chunks

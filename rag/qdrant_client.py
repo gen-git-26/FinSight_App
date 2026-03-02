@@ -120,6 +120,8 @@ class HybridQdrant:
                         ("type", rest.PayloadSchemaType.KEYWORD),
                         ("date", rest.PayloadSchemaType.TEXT),
                         ("user", rest.PayloadSchemaType.KEYWORD),
+                        # valid_until is a numeric (Unix epoch) field used for range filtering
+                        ("valid_until", rest.PayloadSchemaType.FLOAT),
                     ]:
                         try:
                             self.client.create_payload_index(self.collection, field_name=field, field_schema=schema)
@@ -146,6 +148,8 @@ class HybridQdrant:
             ("type", rest.PayloadSchemaType.KEYWORD),
             ("date", rest.PayloadSchemaType.TEXT),
             ("user", rest.PayloadSchemaType.KEYWORD),
+            # valid_until is a numeric (Unix epoch) field used for range filtering
+            ("valid_until", rest.PayloadSchemaType.FLOAT),
         ]:
             try:
                 self.client.create_payload_index(self.collection, field_name=field, field_schema=schema)
@@ -176,6 +180,9 @@ class HybridQdrant:
                 "source": it.get("source", ""),
                 "slug": it.get("slug", ""),
                 "user": it.get("user", ""),
+                "validity_class": it.get("validity_class", ""),
+                "as_of":          it.get("as_of"),
+                "valid_until":    it.get("valid_until"),
             }
             points.append(
                 rest.PointStruct(
