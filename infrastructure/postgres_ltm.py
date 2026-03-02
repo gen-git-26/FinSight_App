@@ -14,7 +14,7 @@ import os
 import json
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import contextmanager
 
 try:
@@ -320,7 +320,7 @@ class PostgresLTM:
         source: Optional[str] = None,
     ) -> bool:
         """Save a trading decision to history."""
-        as_of_ts = datetime.utcfromtimestamp(as_of) if as_of else datetime.utcnow()
+        as_of_ts = datetime.fromtimestamp(as_of, tz=timezone.utc) if as_of else datetime.now(tz=timezone.utc)
 
         with self.get_connection() as conn:
             if conn is None:
@@ -397,7 +397,7 @@ class PostgresLTM:
         source: Optional[str] = None,
     ) -> bool:
         """Save a conversation message."""
-        as_of_ts = datetime.utcfromtimestamp(as_of) if as_of else datetime.utcnow()
+        as_of_ts = datetime.fromtimestamp(as_of, tz=timezone.utc) if as_of else datetime.now(tz=timezone.utc)
 
         with self.get_connection() as conn:
             if conn is None:
