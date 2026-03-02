@@ -153,3 +153,56 @@ def test_save_message_includes_validity_fields():
     assert executed_sql, "No SQL was executed"
     assert "validity_class" in executed_sql[0]
     assert "as_of" in executed_sql[0]
+
+
+# === Task 6: LTM read paths — staleness filter ===
+
+def test_get_trading_history_filters_expired_rows():
+    """get_trading_history must include valid_for_context_until filter."""
+    from unittest.mock import MagicMock, patch
+    from infrastructure.postgres_ltm import PostgresLTM
+
+    ltm = PostgresLTM()
+    executed_sql = []
+
+    mock_cursor = MagicMock()
+    mock_cursor.__enter__ = lambda s: s
+    mock_cursor.__exit__ = MagicMock(return_value=False)
+    mock_cursor.execute = lambda sql, params: executed_sql.append(sql)
+    mock_cursor.fetchall = MagicMock(return_value=[])
+
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = lambda s: s
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+
+    with patch.object(ltm, 'get_connection', return_value=mock_conn):
+        ltm.get_trading_history(user_id="u1", context_only=True)
+
+    assert executed_sql, "No SQL was executed"
+    assert "valid_for_context_until" in executed_sql[0]
+
+def test_get_conversation_history_filters_expired_rows():
+    """get_conversation_history must include valid_for_context_until filter."""
+    from unittest.mock import MagicMock, patch
+    from infrastructure.postgres_ltm import PostgresLTM
+
+    ltm = PostgresLTM()
+    executed_sql = []
+
+    mock_cursor = MagicMock()
+    mock_cursor.__enter__ = lambda s: s
+    mock_cursor.__exit__ = MagicMock(return_value=False)
+    mock_cursor.execute = lambda sql, params: executed_sql.append(sql)
+    mock_cursor.fetchall = MagicMock(return_value=[])
+
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = lambda s: s
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+
+    with patch.object(ltm, 'get_connection', return_value=mock_conn):
+        ltm.get_conversation_history(user_id="u1", context_only=True)
+
+    assert executed_sql, "No SQL was executed"
+    assert "valid_for_context_until" in executed_sql[0]

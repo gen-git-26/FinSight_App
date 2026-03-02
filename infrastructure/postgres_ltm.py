@@ -348,26 +348,36 @@ class PostgresLTM:
         self,
         user_id: str,
         ticker: Optional[str] = None,
-        limit: int = 50
+        limit: int = 50,
+        context_only: bool = True,
     ) -> List[Dict]:
-        """Get trading decision history."""
+        """Get trading decision history.
+
+        Args:
+            context_only: If True (default), filter out expired records.
+                          Set False only for audit/admin queries.
+        """
+        freshness_clause = (
+            "AND (valid_for_context_until > NOW() OR valid_for_context_until IS NULL)"
+            if context_only else ""
+        )
         with self.get_connection() as conn:
             if conn is None:
                 return []
 
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 if ticker:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM trading_decisions
-                        WHERE user_id = %s AND ticker = %s
-                        ORDER BY created_at DESC
+                        WHERE user_id = %s AND ticker = %s {freshness_clause}
+                        ORDER BY as_of DESC
                         LIMIT %s
                     """, (user_id, ticker, limit))
                 else:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM trading_decisions
-                        WHERE user_id = %s
-                        ORDER BY created_at DESC
+                        WHERE user_id = %s {freshness_clause}
+                        ORDER BY as_of DESC
                         LIMIT %s
                     """, (user_id, limit))
 
@@ -409,26 +419,31 @@ class PostgresLTM:
         self,
         user_id: str,
         session_id: Optional[str] = None,
-        limit: int = 100
+        limit: int = 100,
+        context_only: bool = True,
     ) -> List[Dict]:
         """Get conversation history."""
+        freshness_clause = (
+            "AND (valid_for_context_until > NOW() OR valid_for_context_until IS NULL)"
+            if context_only else ""
+        )
         with self.get_connection() as conn:
             if conn is None:
                 return []
 
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 if session_id:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM conversation_memory
-                        WHERE user_id = %s AND session_id = %s
-                        ORDER BY created_at ASC
+                        WHERE user_id = %s AND session_id = %s {freshness_clause}
+                        ORDER BY as_of ASC
                         LIMIT %s
                     """, (user_id, session_id, limit))
                 else:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM conversation_memory
-                        WHERE user_id = %s
-                        ORDER BY created_at DESC
+                        WHERE user_id = %s {freshness_clause}
+                        ORDER BY as_of DESC
                         LIMIT %s
                     """, (user_id, limit))
 
