@@ -245,3 +245,45 @@ def test_ingest_raw_payload_contains_valid_until_as_epoch():
     assert item["validity_class"] == "price_snapshot"
     # price_snapshot window = 3600s
     assert item["valid_until"] == 1740960000 + 3600
+
+
+# === Task 8: MemoryPolicy ===
+
+def test_memory_policy_current_price_requires_live_tools():
+    from infrastructure.memory_policy import get_policy
+    from infrastructure.memory_types import QueryIntent
+    policy = get_policy(QueryIntent.PRICE_ONLY)
+    assert policy.require_live_tools is True
+
+def test_memory_policy_current_price_excludes_price_snapshot():
+    from infrastructure.memory_policy import get_policy
+    from infrastructure.memory_types import QueryIntent
+    policy = get_policy(QueryIntent.PRICE_ONLY)
+    assert "price_snapshot" not in policy.allowed_classes
+
+def test_memory_policy_preference_lookup_no_live_tools():
+    from infrastructure.memory_policy import get_policy
+    from infrastructure.memory_types import QueryIntent
+    policy = get_policy(QueryIntent.USER_PREFERENCES)
+    assert policy.require_live_tools is False
+
+def test_memory_policy_trade_decision_allows_all_stable_classes():
+    from infrastructure.memory_policy import get_policy
+    from infrastructure.memory_types import QueryIntent
+    policy = get_policy(QueryIntent.TRADE_DECISION)
+    assert "trading_decision" in policy.allowed_classes
+    assert "user_preference" in policy.allowed_classes
+    assert "fundamental_data" in policy.allowed_classes
+
+def test_memory_policy_trade_decision_price_snapshot_is_context_only():
+    from infrastructure.memory_policy import get_policy
+    from infrastructure.memory_types import QueryIntent
+    policy = get_policy(QueryIntent.TRADE_DECISION)
+    assert "price_snapshot" in policy.context_only_classes
+
+def test_memory_policy_explain_last_decision_no_live_tools():
+    from infrastructure.memory_policy import get_policy
+    from infrastructure.memory_types import QueryIntent
+    policy = get_policy(QueryIntent.USER_HISTORY)
+    assert policy.require_live_tools is False
+    assert "trading_decision" in policy.allowed_classes
