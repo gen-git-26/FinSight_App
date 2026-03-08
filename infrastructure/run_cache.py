@@ -82,12 +82,13 @@ class RunCache:
     def __init__(self, config: Optional[CacheConfig] = None):
         self.config = config or CacheConfig.from_env()
         self._client: Optional[redis.Redis] = None
+        self._unavailable: bool = False  # Stop retrying after first failure
         self._fallback: Dict[str, Any] = {}
 
     @property
     def client(self) -> Optional[redis.Redis]:
         """Get or create Redis client."""
-        if not REDIS_AVAILABLE:
+        if not REDIS_AVAILABLE or self._unavailable:
             return None
 
         if self._client is None:
@@ -97,12 +98,15 @@ class RunCache:
                     port=self.config.port,
                     db=self.config.db,
                     password=self.config.password,
-                    decode_responses=True
+                    decode_responses=True,
+                    socket_connect_timeout=2,
+                    socket_timeout=2,
                 )
                 self._client.ping()
             except Exception as e:
                 print(f"[RunCache] Redis connection failed: {e}")
                 self._client = None
+                self._unavailable = True
 
         return self._client
 

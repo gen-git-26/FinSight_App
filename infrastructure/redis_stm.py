@@ -65,12 +65,13 @@ class RedisSTM:
     def __init__(self, config: Optional[STMConfig] = None):
         self.config = config or STMConfig.from_env()
         self._client: Optional[redis.Redis] = None
+        self._unavailable: bool = False  # Stop retrying after first failure
         self._fallback: Dict[str, Any] = {}  # In-memory fallback
 
     @property
     def client(self) -> Optional[redis.Redis]:
         """Get or create Redis client."""
-        if not REDIS_AVAILABLE:
+        if not REDIS_AVAILABLE or self._unavailable:
             return None
 
         if self._client is None:
@@ -80,13 +81,16 @@ class RedisSTM:
                     port=self.config.port,
                     db=self.config.db,
                     password=self.config.password,
-                    decode_responses=True
+                    decode_responses=True,
+                    socket_connect_timeout=2,
+                    socket_timeout=2,
                 )
                 # Test connection
                 self._client.ping()
             except Exception as e:
                 print(f"[STM] Redis connection failed: {e}, using in-memory fallback")
                 self._client = None
+                self._unavailable = True
 
         return self._client
 
