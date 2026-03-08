@@ -36,6 +36,14 @@ _INTENT_TO_AGENT: dict = {
 
 _CLASSIFIER_CONFIDENCE_THRESHOLD = 0.85
 
+# Intents that require a ticker symbol to be useful
+_TICKER_REQUIRED_INTENTS = {
+    QueryIntent.PRICE_ONLY,
+    QueryIntent.TICKER_INFO,
+    QueryIntent.NEWS_SUMMARY,
+    QueryIntent.TRADE_DECISION,
+}
+
 
 # Trading-related keywords for A2A routing
 TRADING_KEYWORDS = [
@@ -183,11 +191,16 @@ async def router_node(state: AgentState) -> Dict[str, Any]:
         memory_policy = get_policy(context.classification.intent)
 
     # Fast path: use classifier result if high confidence (skips redundant LLM call)
+    # Skip fast-path when intent requires a ticker but none was extracted (e.g. "Apple stock price")
+    _classification = context.classification if context else None
+    _has_ticker = bool(_classification and _classification.tickers)
+    _needs_ticker = bool(_classification and _classification.intent in _TICKER_REQUIRED_INTENTS)
     if (
         context
         and context.classification
         and context.classification.confidence >= _CLASSIFIER_CONFIDENCE_THRESHOLD
         and context.classification.intent in _INTENT_TO_AGENT
+        and (not _needs_ticker or _has_ticker)
     ):
         intent = context.classification.intent
         next_agent, query_type, is_trading_query = _INTENT_TO_AGENT[intent]
