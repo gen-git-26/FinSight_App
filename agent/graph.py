@@ -81,6 +81,7 @@ Architecture Diagram:
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from langgraph.graph import StateGraph, END
@@ -312,7 +313,7 @@ def run_query(query: str, user_id: str = "default") -> str:
     print(f"[Graph] Starting query: {query[:80]}...")
     print(f"{'='*60}")
 
-    result = graph.invoke(initial_state)
+    result = asyncio.run(graph.ainvoke(initial_state))
 
     is_trading = result.get("is_trading_query", False)
     print(f"\n{'='*60}")
