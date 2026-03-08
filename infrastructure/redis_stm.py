@@ -41,6 +41,8 @@ class STMConfig:
     @classmethod
     def from_env(cls) -> "STMConfig":
         """Load config from environment variables."""
+        from utils.config import _ensure_env_loaded
+        _ensure_env_loaded()
         return cls(
             host=os.getenv("REDIS_HOST", "localhost"),
             port=int(os.getenv("REDIS_PORT", "6379")),

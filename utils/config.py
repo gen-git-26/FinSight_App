@@ -14,7 +14,7 @@ def _ensure_env_loaded() -> None:
     if _ENV_LOADED:
         return
     env_path = Path(__file__).resolve().parent.parent / ".env"
-    load_dotenv(env_path, override=False)
+    load_dotenv(env_path, override=True)
     _ENV_LOADED = True
 
 

@@ -41,6 +41,8 @@ class CacheConfig:
 
     @classmethod
     def from_env(cls) -> "CacheConfig":
+        from utils.config import _ensure_env_loaded
+        _ensure_env_loaded()
         return cls(
             host=os.getenv("REDIS_HOST", "localhost"),
             port=int(os.getenv("REDIS_PORT", "6379")),
