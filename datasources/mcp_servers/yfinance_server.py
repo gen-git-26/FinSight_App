@@ -283,12 +283,17 @@ def get_news(ticker: str, limit: int = 5) -> str:
 
         articles = []
         for article in news[:limit]:
+            # yfinance >= 0.2.x nests article data under 'content'
+            content = article.get("content") or article
+            provider = content.get("provider") or {}
+            canonical = content.get("canonicalUrl") or content.get("clickThroughUrl") or {}
             articles.append({
-                "title": article.get("title"),
-                "publisher": article.get("publisher"),
-                "link": article.get("link"),
-                "published": article.get("providerPublishTime"),
-                "type": article.get("type"),
+                "title": content.get("title"),
+                "publisher": provider.get("displayName") or content.get("publisher"),
+                "link": canonical.get("url") or content.get("link"),
+                "published": content.get("pubDate") or content.get("providerPublishTime"),
+                "summary": content.get("summary") or content.get("description"),
+                "type": content.get("contentType") or content.get("type"),
             })
 
         return json.dumps({
