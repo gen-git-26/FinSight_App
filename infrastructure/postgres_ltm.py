@@ -38,6 +38,8 @@ class LTMConfig:
     @classmethod
     def from_env(cls) -> "LTMConfig":
         """Load config from environment variables."""
+        from utils.config import _ensure_env_loaded
+        _ensure_env_loaded()
         return cls(
             host=os.getenv("POSTGRES_HOST", "localhost"),
             port=int(os.getenv("POSTGRES_PORT", "5432")),
@@ -220,7 +222,9 @@ class PostgresLTM:
                 port=self.config.port,
                 database=self.config.database,
                 user=self.config.user,
-                password=self.config.password
+                password=self.config.password,
+                sslmode="require",
+                connect_timeout=10,
             )
             yield conn
             conn.commit()
