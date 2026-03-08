@@ -73,6 +73,9 @@ router → fetcher → analysts_team (4 parallel) → researchers (bull/bear deb
   - `run_cache.py` - **Run-level tool cache**: deduplicates A2A data fetches (Redis DB 1)
   - `postgres_ltm.py` - Long-term memory: user profiles, trading decisions (PostgreSQL)
   - `postgres_summaries.py` - Pre-computed user/ticker summaries (updated at write-time)
+  - `memory_policy.py` - `MemoryPolicy` dataclass: maps QueryIntent → allowed ValidityClasses + live-tool requirements
+  - `validity.py` - `ValidityClass` enum: data freshness windows (PRICE_SNAPSHOT=1hr, END_OF_DAY=48hr, NEWS=7d, etc.)
+  - `logging.py` - Loguru structured logging: colored console + JSON file output
 
 - `rag/` - Retrieval-Augmented Generation
   - `qdrant_client.py` - `HybridQdrant`: dense (3072d) + sparse (BM25) vectors + RRF fusion
@@ -85,9 +88,12 @@ router → fetcher → analysts_team (4 parallel) → researchers (bull/bear deb
 
 ### Query Routing
 
-Router (`agent/nodes/router.py`) uses hybrid routing:
-1. LLM-based detection (primary)
-2. Keyword fallback (secondary)
+Router (`agent/nodes/router.py`) uses 3-stage routing:
+1. `QueryClassifier` fast-path — regex/keywords (Stage 1), skips LLM for high-confidence intents
+2. LLM-based detection — for ambiguous queries
+3. Keyword fallback — final safety net
+
+Router emits `memory_policy` (MemoryPolicy) into AgentState based on classified intent.
 
 Routing keywords:
 - **Trading**: "buy", "sell", "should I", "invest", "forecast" → A2A flow
@@ -99,6 +105,7 @@ Routing keywords:
 All agents share `AgentState` (TypedDict in `agent/state.py`). Key fields:
 - `query`, `user_id` - Input
 - `parsed_query`, `next_agent`, `is_trading_query` - Router output
+- `memory_policy` - MemoryPolicy from router (controls which validity classes are allowed)
 - `fetched_data` - Data from Fetcher/Crypto
 - `analyst_reports`, `research_report`, `trading_decision`, `risk_assessment`, `fund_manager_decision` - Trading flow
 - `response`, `sources` - Final output
@@ -155,17 +162,15 @@ Query → 2-Stage Classifier → Route to minimal layers → Race pattern fetch 
 - `RunCache` — checked/written in `fetcher_node` to deduplicate A2A data fetches
 - `MemoryManager.store_decision()` + `store_message()` — called in `fund_manager_node` after final approval
 - RAG retrieval — `rag_chunks` from `memory_context` injected into all 4 analyst system prompts
+- `QueryClassifier` — connected in `router_node`; fast-path skips LLM for high-confidence intents
+- `PostgreSQL LTM` — tables initialized on startup in `api.py` and `graph.py`; `PostgresSummaries` updated at write-time
+- Validity filtering — Qdrant and LTM filter by `valid_for_context_until`; `stamp_memory_fact` labels context with as_of/age
 
 ### ❌ Built but NOT Yet Connected to Agents
-- `QueryClassifier` — exists, not used by router (LLM + keyword fallback still used)
-- `PostgreSQL LTM` — exists, requires `DATABASE_URL` in `.env`; `store_decision()` calls it but degrades gracefully without it
-- `PostgresSummaries` — exists, called by `store_decision()` but requires Postgres
 - MCP servers — code exists, not added to DataFetcher fallback chain
 
 ### Next Integration Steps (Priority Order)
-1. **P1**: Add `DATABASE_URL` to `.env` and initialize Postgres on startup (unlocks LTM + summaries)
-2. **P2**: Replace router classification with `QueryClassifier`
-3. **P3**: Add MCP servers to DataFetcher fallback chain
+1. **P3**: Add MCP servers to DataFetcher fallback chain
 
 ## Environment Variables
 
@@ -198,6 +203,12 @@ ALPHAVANTAGE_API_KEY=...
 FINANCIAL_DATASETS_API_KEY=...
 COINSTATS_API_KEY=...
 ```
+
+## Gotchas
+
+- **Datetime**: Always use `datetime.now(timezone.utc)` — `datetime.utcnow()` and `datetime.utcfromtimestamp()` are deprecated in Python 3.12 and produce naïve datetimes that break comparisons.
+- **Postgres config**: `LTMConfig.from_env()` reads `POSTGRES_HOST/PORT/DB/USER/PASSWORD` individually — not a single `DATABASE_URL`.
+- **Known flaky tests**: `test_mcp_servers.py` and `test_memory_system.py::test_memory_manager` have pre-existing failures (async def without pytest-asyncio) — not regressions.
 
 ## Python Version
 
