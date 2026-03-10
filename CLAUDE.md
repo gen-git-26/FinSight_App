@@ -166,11 +166,8 @@ Query → 2-Stage Classifier → Route to minimal layers → Race pattern fetch 
 - `PostgreSQL LTM` — tables initialized on startup in `api.py` and `graph.py`; `PostgresSummaries` updated at write-time
 - Validity filtering — Qdrant and LTM filter by `valid_for_context_until`; `stamp_memory_fact` labels context with as_of/age
 
-### ❌ Built but NOT Yet Connected to Agents
-- MCP servers — code exists, not added to DataFetcher fallback chain
-
-### Next Integration Steps (Priority Order)
-1. **P3**: Add MCP servers to DataFetcher fallback chain
+### ✅ Also Connected (as of 2026-03-08)
+- MCP servers — `PREFER_MCP` is the default `DataFetcher` strategy; `setup_default_servers()` wires yfinance + financial-datasets MCP servers automatically
 
 ## Environment Variables
 
@@ -182,9 +179,14 @@ OPENAI_MODEL=gpt-4o-mini
 
 Optional — Memory:
 ```
-DATABASE_URL=postgresql://user:pass@localhost:5432/finsight   # Needed for LTM
-REDIS_HOST=localhost
-REDIS_PORT=6379
+POSTGRES_HOST=...             # e.g. Neon pooler host (use Neon for free managed Postgres — IPv4 compatible)
+POSTGRES_PORT=5432
+POSTGRES_DB=neondb
+POSTGRES_USER=neondb_owner
+POSTGRES_PASSWORD=...
+REDIS_HOST=...                # e.g. RedisLabs Cloud host
+REDIS_PORT=...
+REDIS_PASSWORD=...
 REDIS_DB=0                    # STM database
 REDIS_CACHE_DB=1              # RunCache database
 ```
@@ -209,6 +211,13 @@ COINSTATS_API_KEY=...
 - **Datetime**: Always use `datetime.now(timezone.utc)` — `datetime.utcnow()` and `datetime.utcfromtimestamp()` are deprecated in Python 3.12 and produce naïve datetimes that break comparisons.
 - **Postgres config**: `LTMConfig.from_env()` reads `POSTGRES_HOST/PORT/DB/USER/PASSWORD` individually — not a single `DATABASE_URL`.
 - **Known flaky tests**: `test_mcp_servers.py` and `test_memory_system.py::test_memory_manager` have pre-existing failures (async def without pytest-asyncio) — not regressions.
+- **Async graph**: `router_node`, `fetcher_node`, `fund_manager_node` are `async def` — always use `graph.ainvoke()` or `asyncio.run(graph.ainvoke())`. Never `graph.invoke()`.
+- **Router fast-path + tickers**: `QueryClassifier` only extracts uppercase tickers (e.g. `AAPL`). Company names like "Apple" → `tickers=[]`. Fast-path skips LLM only when ticker-requiring intents have an extracted ticker.
+- **yfinance news schema**: As of yfinance ≥0.2.x, `stock.news` returns `[{'id': ..., 'content': {...}}]` — extract fields from `article['content']`, not the top-level dict.
+- **dotenv override**: `load_dotenv` uses `override=True` — `.env` values always win over shell environment variables. Required because the codespace sets `POSTGRES_HOST=localhost` etc. in the shell.
+- **Neon vs Supabase**: This codespace has no IPv6 outbound. Supabase free plan is IPv6-only. Use Neon (neon.tech) for free managed Postgres — IPv4 compatible.
+- **psycopg2 + Neon**: Always pass `sslmode='require'` and `connect_timeout=10` to `psycopg2.connect()` for Neon.
+- **Redis reconnect**: `RedisSTM` and `RunCache` use an `_unavailable` flag — once a connection fails, they stop retrying for the process lifetime. Requires `socket_connect_timeout=2` on `redis.Redis()` to avoid blocking the event loop.
 
 ## Python Version
 
