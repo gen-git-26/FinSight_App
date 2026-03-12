@@ -1,5 +1,5 @@
-streamlit
-openai
+streamlit==1.53.1
+openai==2.15.0
 mcp
 python-dotenv
 pydantic
@@ -9,16 +9,17 @@ orjson
 agno
 fastapi
 uvicorn
-langchain
+langchain==1.2.7
+langchain-core==1.2.7
 finnhub-python
-langchain_groq
+langchain_groq==1.1.1
 websockets
 yfinance
-qdrant_client
-langgraph
+qdrant_client==1.16.2
+langgraph==1.0.7
 
 # Infrastructure
-redis
-psycopg2-binary
+redis==7.2.0
+psycopg2-binary==2.9.11
 loguru
 httpx
