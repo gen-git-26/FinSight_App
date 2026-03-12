@@ -1,7 +1,7 @@
 # Design: Streamlit Cloud Deployment
 
 **Date:** 2026-03-12
-**Status:** Approved
+**Status:** Approved (v2 — post spec review)
 
 ## Goal
 
@@ -16,48 +16,69 @@ Deploy FinSight to Streamlit Community Cloud so external users can access the fu
 
 ## Architecture
 
-No structural changes to the agent graph or memory system. Three targeted changes only:
+No structural changes to the agent graph or memory system. Three targeted changes only.
 
-### 1. Password Gate — `app.py`
+---
 
-Add 5 lines before `main(query_fn=run_query)`:
+## Code Changes
+
+### 1. `app.py` — Secrets sync + Password gate
+
+**Two responsibilities in one block, added before the agent import:**
 
 ```python
-import os, streamlit as st
-_pw = st.secrets.get("FINSIGHT_PASSWORD", os.getenv("FINSIGHT_PASSWORD", ""))
+# app.py — add at the top, before `from agent.graph import run_query`
+import os
+import streamlit as st
+
+# 1. Sync st.secrets → os.environ so all infra configs (Redis, Postgres, OpenAI)
+#    can read them via os.getenv(). Must happen before agent.graph is imported
+#    because that import initialises Postgres tables and the memory manager.
+#    Wrapped in try/except: locally, no secrets.toml exists — dotenv.load_dotenv()
+#    handles that case instead.
+try:
+    for _k, _v in st.secrets.items():
+        if isinstance(_v, str):
+            os.environ.setdefault(_k, _v)
+except Exception:
+    pass  # local dev: .env loaded by dotenv.load_dotenv() below
+
+# 2. Password gate (remove these 4 lines to open access)
+_pw = os.environ.get("FINSIGHT_PASSWORD", "")
 if _pw:
-    entered = st.text_input("Password", type="password")
-    if entered != _pw:
+    _entered = st.text_input("Password", type="password")
+    if _entered != _pw:
         st.stop()
 ```
 
-**Reversal:** Delete these 5 lines.
+**Import order constraint:** All `st.*` imports and `from ui.skeleton import main` must remain below this block. `set_page_config` inside `skeleton.py` runs at import time — this is fine because Streamlit processes it before rendering, but the password check must be after all imports and before `main(...)`.
 
-### 2. MCP Graceful Fallback — `datasources/__init__.py`
+**Reversal:** Delete the two blocks above (secrets sync + password gate). `dotenv.load_dotenv()` already handles local `.env` files in development.
 
-Current default: `FetchStrategy.PREFER_MCP` (tries MCP subprocess first).
-On Streamlit Cloud, `create_subprocess_exec` is blocked — MCP init will fail.
+---
 
-Change: wrap MCP server setup in try/except; on failure, downgrade strategy to `FIRST_SUCCESS` (direct API calls). The fallback chain already exists: yfinance → Finnhub → AlphaVantage.
+### 2. `datasources/__init__.py` — MCP graceful fallback
 
-**No functional difference for users** — all data arrives via API clients.
+**No code change needed.** The fallback is already handled.
 
-**Reversal:** Remove try/except, restore unconditional `PREFER_MCP`.
+`setup_default_servers(use_local=True)` (line 86) only registers a `MCPServerConfig` into a dict — it does not spawn subprocesses. The actual subprocess is spawned inside `MCPClient.connect()` → `stdio_client()`, which is called by `call_tool()`. That call is already inside the existing `try/except Exception` block (lines 92–106). When Streamlit Cloud blocks the subprocess, the exception is caught, `_fetch_via_mcp` returns `None`, and the `PREFER_MCP` strategy falls back to API clients automatically.
 
-### 3. System Dependencies — `packages.txt` (new file)
+**Nothing to change. No reversal needed.**
 
-Streamlit Cloud uses `packages.txt` for apt packages before pip install.
-`psycopg2-binary` requires `libpq-dev`:
+---
 
-```
-libpq-dev
-```
+### 3. `packages.txt` — NOT needed
 
-**Reversal:** Delete `packages.txt`.
+`psycopg2-binary` is a self-contained wheel that bundles its own `libpq`. It does not require `libpq-dev`. No `packages.txt` file is needed for the current `requirements.txt`.
+
+**If in future `psycopg2` (non-binary) is used instead**, then `libpq-dev` would be required. For now: no `packages.txt`.
+
+---
 
 ## Secrets Configuration
 
-All env vars entered in Streamlit Cloud → Settings → Secrets (TOML format):
+All env vars entered in **Streamlit Cloud → App Settings → Secrets** (TOML format).
+The secrets sync code in `app.py` copies them to `os.environ` at startup.
 
 ```toml
 OPENAI_API_KEY = "..."
@@ -83,31 +104,28 @@ FINNHUB_API_KEY = "..."
 ALPHAVANTAGE_API_KEY = "..."
 ```
 
+---
+
 ## What Does NOT Change
 
 - `agent/` — all nodes, graph, state unchanged
 - `infrastructure/` — memory manager, Redis, Postgres, Qdrant unchanged
 - `.streamlit/config.toml` — theme loaded automatically by Streamlit Cloud
-- `requirements.txt` — no additions needed (all deps already listed)
+- `requirements.txt` — no additions needed
 - Both query flows (Standard + Trading A2A) work as-is
 
-## Fallback Plan
-
-If Streamlit Cloud proves insufficient (performance, subprocess restrictions):
-→ Deploy via Render.com using the existing `Dockerfile` + supervisord.
-MCP servers will work on Render (full Docker environment). Free tier has 15-min sleep on inactivity.
+---
 
 ## Files Changed
 
-| File | Change | Reversible |
-|------|--------|-----------|
-| `app.py` | +5 lines password gate | Delete 5 lines |
-| `datasources/__init__.py` | MCP try/except fallback | Remove try/except |
-| `packages.txt` | New file, 1 line | Delete file |
+| File | Change | Reversal |
+|------|--------|---------|
+| `app.py` | +12 lines (secrets sync + password gate) | Delete the 2 blocks |
+| `datasources/__init__.py` | No change needed — fallback already works | N/A |
+| `packages.txt` | Not created | N/A |
 
-## Out of Scope
+---
 
-- CI/CD pipeline (Streamlit Cloud auto-deploys on git push)
-- Custom domain
-- Rate limiting per user
-- Render deployment (only if Streamlit Cloud fails)
+## Fallback Plan
+
+If Streamlit Cloud proves insufficient → deploy via Render.com using the existing `Dockerfile` + supervisord. MCP servers will work (full Docker, no subprocess restriction). Free tier sleeps after 15 min inactivity (~30s cold start).
